@@ -217,7 +217,7 @@ const plus15Minutes = async () => {
             onClick={handleRefresh}
             className="px-4 py-2 rounded-xl2 bg-pool-600 hover:bg-pool-500 transition"
           >
-            new
+            Refresh Time
           </button>
         </div>
       </header>

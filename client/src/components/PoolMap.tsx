@@ -100,8 +100,16 @@ export default function PoolMap({
               rx={1.6}
               className="cursor-pointer"
               fill={has ? "#1e293b" : "rgba(2,6,23,0.5)"}
-              stroke={isConflict ? "#ef4444" : has ? "#22c55e" : "#64748b"}
-              strokeWidth={0.7}
+              stroke={
+                REST_STATIONS.has(p.id)
+                  ? "#dc2626" // 🔴 red outline for rest chairs
+                  : isConflict
+                    ? "#ef4444" // conflict red
+                    : has
+                      ? "#22c55e" // green if assigned
+                      : "#64748b" // gray if empty
+              }
+              strokeWidth={REST_STATIONS.has(p.id) ? 1.5 : 0.7} // make rest chair border thicker
               onClick={() => onPick(p.id)}
             />
 
@@ -121,8 +129,8 @@ export default function PoolMap({
                 )}
               </>
             ) : (
-              <text x={boxW / 2} y={9.5} textAnchor="middle" fontSize="3" fill="#e2e8f0" className="pointer-events-none">
-                Assign
+              <text x={boxW / 2} y={11} textAnchor="middle" fontSize="6" fill="#e2e8f0" className="pointer-events-none">
+                X
               </text>
             )}
 
