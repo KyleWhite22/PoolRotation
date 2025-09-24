@@ -10,7 +10,7 @@ export const RotationSlot = z.object({
   date: z.string(),          // "YYYY-MM-DD"
   time: z.string(),          // "HH:MM"
   stationId: z.string(),
-  guardId: z.string().nullable().optional(), // <- allow null
+  guardId: z.string().nullable().optional(), // allow null to clear
   notes: z.string().optional(),
 });
 export type RotationSlot = z.infer<typeof RotationSlot>;

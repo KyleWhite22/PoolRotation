@@ -2,8 +2,8 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 import crypto from "node:crypto";
 import { PutCommand, DeleteCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { ddb, TABLE } from "../db.ts";
-import { GuardCreate } from "../schema.ts";
+import { ddb, TABLE } from "../db.js";
+import { GuardCreate } from "../schema.js";
 
 const router = Router();
 
@@ -41,9 +41,9 @@ router.post("/", async (req: Request, res: Response) => {
     await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
     res.status(201).json({ id, ...item });
   } catch (err: any) {
-  console.error("POST /api/guards error:", err);
-  res.status(500).json({ error: "Failed to create guard", detail: err?.name || err?.message || String(err) });
-}
+    console.error("POST /api/guards error:", err);
+    res.status(500).json({ error: "Failed to create guard", detail: err?.name || err?.message || String(err) });
+  }
 });
 
 // Delete guard

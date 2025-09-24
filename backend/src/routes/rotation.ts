@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { ddb, TABLE } from "../db.ts";
-import { RotationSlot } from "../schema.ts";
+import { ddb, TABLE } from "../db.js";
+import { RotationSlot } from "../schema.js";
 
 const router = Router();
 

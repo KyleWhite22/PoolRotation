@@ -1,26 +1,51 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import PoolMap from "../components/PoolMap";
 import GuardPickerModal from "../components/GuardPickerModal";
 import CreateGuardModal from "../components/CreateGuardModal";
 import type { Guard } from "../components/GuardPickerModal";
-import { POSITIONS, EDGES } from "../data/poolLayout";
+import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_STATIONS }
+  from "../../../shared/data/poolLayout.js";
+// -------- Helpers --------
+const todayISO = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
-const today = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 type Assigned = Record<string, string | null>;
+type BreakState = Record<string, string>; // guardId -> breakUntilISO
+type ConflictUI = { stationId: string; guardId: string; reason: string };
 
 export default function Home() {
+  // --- Server data ---
   const [guards, setGuards] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // initialize all positions as null
+  // --- Rotation state ---
   const [assigned, setAssigned] = useState<Assigned>(() =>
     Object.fromEntries(POSITIONS.map((p) => [p.id, null]))
   );
+  const [breaks, setBreaks] = useState<BreakState>({});
+  const [conflicts, setConflicts] = useState<ConflictUI[]>([]);
 
+  // --- UI state ---
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const rotatingRef = useRef(false);
 
-  // Normalize API results -> Guard[]
+
+  // --- Derived ---
+  const usedGuardIds = useMemo(
+    () => Object.values(assigned).filter((v): v is string => Boolean(v)),
+    [assigned]
+  );
+
+  // -------- Effects --------
+  useEffect(() => {
+    (async () => {
+      await fetchGuards();
+      await fetchAssignments();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // -------- Data funcs --------
   const normalizeGuards = (items: any[]): Guard[] =>
     items
       .map((it) => {
@@ -28,8 +53,8 @@ export default function Home() {
           typeof it.id === "string"
             ? it.id
             : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
-              ? it.pk.slice("GUARD#".length)
-              : "";
+            ? it.pk.slice("GUARD#".length)
+            : "";
         if (!id) return null;
         return { id, name: it.name ?? "", dob: it.dob ?? "" };
       })
@@ -45,63 +70,54 @@ export default function Home() {
       setLoading(false);
     }
   };
+const handleRefresh = async () => {
+  await fetchGuards();
+  await fetchAssignments();
 
-  useEffect(() => {
-    fetchGuards().then(fetchAssignments);
-  }, []);
-  // Guards already used (to filter the picker)
-  const usedGuardIds = useMemo(
-    () => Object.values(assigned).filter((v): v is string => Boolean(v)),
-    [assigned]
-  );
-  type RotationItem = {
-    stationId: string;
-    guardId?: string;
-    updatedAt?: string;
+  // reset simulated clock back to noon
+  const reset = new Date();
+  reset.setHours(12, 0, 0, 0);
+  setSimulatedNow(reset);
+};
+  const fetchAssignments = async () => {
+    const res = await fetch(`/api/rotations/day/${todayISO()}`, {
+      headers: { "x-api-key": "dev-key-123" },
+    });
+    const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
+      await res.json();
+
+    const latestByStation = new Map<string, (typeof items)[number]>();
+    for (const it of items) {
+      const prev = latestByStation.get(it.stationId);
+      if (!prev || String(prev.updatedAt ?? "") < String(it.updatedAt ?? "")) {
+        latestByStation.set(it.stationId, it);
+      }
+    }
+
+    setAssigned((prev) => {
+      const next = { ...prev };
+      for (const p of POSITIONS) {
+        const rec = latestByStation.get(p.id);
+        if (rec) next[p.id] = rec.guardId ?? null;
+      }
+      return next;
+    });
   };
 
- const fetchAssignments = async () => {
-  const res = await fetch(`/api/rotations/day/${today()}`, {
-    headers: { "x-api-key": "dev-key-123" },
-  });
-  const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] = await res.json();
-
-  const latestByStation = new Map<string, typeof items[number]>();
-  for (const it of items) {
-    const prev = latestByStation.get(it.stationId);
-    if (!prev || String(prev.updatedAt ?? "") < String(it.updatedAt ?? "")) {
-      latestByStation.set(it.stationId, it);
-    }
-  }
-
-  setAssigned((prev) => {
-    const next = { ...prev };
-    for (const p of POSITIONS) {
-      const rec = latestByStation.get(p.id);
-      next[p.id] = rec?.guardId ?? null; // will be null for cleared
-    }
-    return next;
-  });
-};
-
-  const openPicker = (positionId: string) => setPickerFor(positionId);
-
+  // -------- Handlers --------
   const assignGuard = async (positionId: string, guardId: string) => {
     if (usedGuardIds.includes(guardId)) return;
 
-    // optimistic update
+    // Optimistic UI
     setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
 
     try {
       await fetch("/api/rotations/slot", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": "dev-key-123",
-        },
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
-          date: today(),
-          time: new Date().toISOString().slice(11, 16), // HH:MM
+          date: todayISO(),
+          time: new Date().toISOString().slice(11, 16),
           stationId: positionId,
           guardId,
           notes: "",
@@ -109,145 +125,118 @@ export default function Home() {
       });
     } catch (err) {
       console.error("Failed to persist assignment:", err);
-    } finally {
-      // refresh from backend
-      fetchAssignments();
     }
   };
- const clearGuard = async (positionId: string) => {
-  // optimistic UI
-  setAssigned((prev) => ({ ...prev, [positionId]: null }));
 
+  const clearGuard = async (positionId: string) => {
+    setAssigned((prev) => ({ ...prev, [positionId]: null }));
+    try {
+      await fetch("/api/rotations/slot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({
+          date: todayISO(),
+          time: new Date().toISOString().slice(11, 16),
+          stationId: positionId,
+          guardId: null,
+          notes: "",
+        }),
+      });
+    } catch (e) {
+      console.error("Failed to clear slot:", e);
+    }
+  };
+
+ // start at 12:00 PM today
+const [simulatedNow, setSimulatedNow] = useState(() => {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0); // force to noon
+  return d;
+});
+
+// -------- Handlers --------
+const plus15Minutes = async () => {
+  if (rotatingRef.current) return;
+  rotatingRef.current = true;
   try {
-    await fetch("/api/rotations/slot", {
+    // advance simulated clock +15m
+    const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
+    setSimulatedNow(newNow);
+
+    // ask server to compute & persist next rotation at that simulated time
+    const res = await fetch("/api/plan/rotate", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": "dev-key-123",
-      },
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({
-        date: today(),
-        time: new Date().toISOString().slice(11, 16), // HH:MM now
-        stationId: positionId,
-        guardId: null, // <-- persist clear
-        notes: "",
+        date: todayISO(),
+        nowISO: newNow.toISOString(),
+        assignedSnapshot: assigned, // 👈 send current client snapshot for fallback
       }),
     });
+    const data = await res.json();
+
+    if (data?.assigned) setAssigned(data.assigned);
+    if (data?.breaks) setBreaks(data.breaks);
+    if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
   } catch (e) {
-    console.error("Failed to clear slot:", e);
+    console.error("Rotate failed:", e);
+    fetchAssignments();
   } finally {
-    // re-sync from server so refresh shows cleared
-    fetchAssignments();
+    rotatingRef.current = false;
   }
 };
-// One rotation step: move along edges; drop if no outgoing edge
-const rotateOnce = async () => {
-  // Build a fresh map with all positions cleared
-  const base: Record<string, string | null> = {};
-  POSITIONS.forEach(p => (base[p.id] = null));
 
-  // Fast lookup for "from -> to"
-  const nextByFrom = new Map(EDGES.map(e => [e.from, e.to]));
-
-  // Compute new assignments
-  const next = { ...base };
-  for (const p of POSITIONS) {
-    const gid = assigned[p.id];
-    if (!gid) continue;
-
-    const to = nextByFrom.get(p.id);
-    if (to) {
-      next[to] = gid;        // move guard to the next slot
-    } else {
-      // no outgoing edge => break (dropped)
-      // intentionally do nothing
-    }
-  }
-
-  // Optimistic UI update
-  setAssigned(next);
-
-  // (Optional) Persist each slot to backend as the "current" snapshot
-  try {
-    const date = new Date().toISOString().slice(0, 10);   // YYYY-MM-DD
-    const time = new Date().toISOString().slice(11, 16);  // HH:MM
-
-    // Fire-and-forget; you can also await Promise.all if you prefer strict ordering
-    await Promise.all(
-      POSITIONS.map(p =>
-        fetch("/api/rotations/slot", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": "dev-key-123",
-          },
-          body: JSON.stringify({
-            date,
-            time,
-            stationId: p.id,
-            guardId: next[p.id], // may be string or null (clear)
-            notes: "rotate",
-          }),
-        })
-      )
-    );
-  } catch (e) {
-    console.error("Failed to persist rotation:", e);
-    // optional: re-sync from server
-    fetchAssignments();
-  }
-};
-const anyAssigned = Object.values(assigned).some(Boolean);
+  // -------- UI helpers --------
+  const anyAssigned = Object.values(assigned).some(Boolean);
 
   return (
     <div className="min-h-screen bg-pool-800 text-white">
-      {/* Top bar */}
       <header className="h-16 flex items-center px-6 border-b border-pool-700 bg-pool-900">
         <h1 className="text-xl font-semibold">Lifeguard Rotation Manager</h1>
         <div className="ml-auto flex gap-2">
-      <button
-  onClick={rotateOnce}
-  disabled={!anyAssigned}
-  className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50 transition"
->
-  Rotate
-</button>
+           <span className="ml-4 text-xs rounded px-2 py-1 border border-pool-600">
+    Simulated Time: {simulatedNow.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+  </span>
           <button
+            type="button"
+            onClick={plus15Minutes}
+            disabled={!anyAssigned || rotatingRef.current}
+            className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50 transition"
+          >
+            +15 Minutes
+          </button>
+          <button
+            type="button"
             onClick={() => setCreateOpen(true)}
             className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 transition"
           >
             New Guard
           </button>
           <button
-            onClick={fetchGuards}
+            type="button"
+            onClick={handleRefresh}
             className="px-4 py-2 rounded-xl2 bg-pool-600 hover:bg-pool-500 transition"
           >
-            Refresh
+            new
           </button>
         </div>
       </header>
 
-  <main className="p-6 max-w-6xl mx-auto space-y-6">
-  <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
-    <h2 className="text-lg font-semibold text-slate-100">Main Pool</h2>
-    <PoolMap
-      className="w-full h-[700px]"
-      guards={guards}
-      assigned={assigned}
-      onPick={openPicker}
-      onClear={clearGuard}
-    />
-    
-  </section>
-</main>
+      <main className="p-6 max-w-6xl mx-auto space-y-6">
+        <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
+          <h2 className="text-lg font-semibold text-slate-100">Main Pool</h2>
+          <PoolMap
+            className="w-full h-[700px]"
+            guards={guards}
+            assigned={assigned}
+            onPick={(positionId) => setPickerFor(positionId)}
+            onClear={clearGuard}
+            conflicts={conflicts}
+          />
+        </section>
+      </main>
 
-      {/* Modals */}
-      <CreateGuardModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        onCreated={fetchGuards}
-      />
-
+      <CreateGuardModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={fetchGuards} />
       <GuardPickerModal
         open={pickerFor !== null}
         onClose={() => setPickerFor(null)}
@@ -255,8 +244,8 @@ const anyAssigned = Object.values(assigned).some(Boolean);
         alreadyAssignedIds={usedGuardIds}
         onSelect={(guardId: string) => {
           if (!pickerFor) return;
-          assignGuard(pickerFor, guardId);
           setPickerFor(null);
+          void assignGuard(pickerFor, guardId);
         }}
         title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
       />
