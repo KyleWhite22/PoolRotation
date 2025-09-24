@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* optional: a tiny global tweak to confirm it’s working */
+:root { --test-outline: 0px; }
