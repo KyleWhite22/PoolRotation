@@ -1,0 +1,37 @@
+@base = http://localhost:3000
+@key  = dev-key-123
+
+### Health
+GET {{base}}/health
+
+### Create guard
+POST {{base}}/api/guards
+Content-Type: application/json
+x-api-key: {{key}}
+
+{ "name": "Kyle White", "dob": "2004-01-26" }
+
+### List guards
+GET {{base}}/api/guards
+x-api-key: {{key}}
+
+### Delete guard (replace with an id you created)
+DELETE {{base}}/api/guards/d73722e8-9c26-4dc6-950f-93d728600170
+x-api-key: {{key}}
+
+### Upsert rotation slot
+POST {{base}}/api/rotations/slot
+Content-Type: application/json
+x-api-key: {{key}}
+
+{
+  "date": "2025-09-24",
+  "time": "11:40",
+  "stationId": "big-pool-north",
+  "guardId": "d73722e8-9c26-4dc6-950f-93d728600170",
+  "notes": "first shift"
+}
+
+### Get day’s schedule
+GET {{base}}/api/rotations/day/2025-09-24
+x-api-key: {{key}}

@@ -1,40 +1,48 @@
 import { Router } from "express";
 import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-
 import { ddb, TABLE } from "../db.ts";
 import { RotationSlot } from "../schema.ts";
 
 const router = Router();
 
 router.get("/day/:date", async (req, res) => {
-  const date = req.params.date;
-  const data = await ddb.send(new QueryCommand({
-    TableName: TABLE,
-    KeyConditionExpression: "pk = :pk",
-    ExpressionAttributeValues: { ":pk": `ROTATION#${date}` }
-  }));
-  res.json(data.Items ?? []);
+  try {
+    const date = req.params.date;
+    const data = await ddb.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: "pk = :pk",
+      ExpressionAttributeValues: { ":pk": `ROTATION#${date}` },
+    }));
+    res.json(data.Items ?? []);
+  } catch (err) {
+    console.error("GET /api/rotations/day/:date error:", err);
+    res.status(500).json({ error: "Failed to fetch day" });
+  }
 });
 
 router.post("/slot", async (req, res) => {
-  const parsed = RotationSlot.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-  const { date, time, stationId, guardId, notes } = parsed.data;
+  try {
+    const parsed = RotationSlot.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-  await ddb.send(new PutCommand({
-    TableName: TABLE,
-    Item: {
-      pk: `ROTATION#${date}`,
-      sk: `SLOT#${time}#${stationId}`,
-      type: "RotationSlot",
-      stationId, guardId, time, date, notes,
-      gsi1pk: `GUARD#${guardId}`,
-      gsi1sk: `${date}T${time}`,
-      updatedAt: new Date().toISOString()
-    }
-  }));
-
-  res.json({ ok: true });
+    const { date, time, stationId, guardId, notes } = parsed.data;
+    await ddb.send(new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: `ROTATION#${date}`,
+        sk: `SLOT#${time}#${stationId}`,
+        type: "RotationSlot",
+        stationId, guardId, time, date, notes,
+        gsi1pk: `GUARD#${guardId}`,
+        gsi1sk: `${date}T${time}`,
+        updatedAt: new Date().toISOString(),
+      },
+    }));
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /api/rotations/slot error:", err);
+    res.status(500).json({ error: "Failed to upsert slot" });
+  }
 });
 
 export default router;
