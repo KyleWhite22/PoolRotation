@@ -12,15 +12,15 @@ export type Edge = {
 };
 
 export const POSITIONS: Position[] = [
-  { id: "first",     label: "1",     x: 190, y: 165 },
-  { id: "second",    label: "2",     x: 145, y:165 },
-  { id: "third",   label: "3",   x: 100, y: 165 },
+  { id: "First",     label: "1",     x: 190, y: 165 },
+  { id: "Second",    label: "2",     x: 145, y:165 },
+  { id: "Third",   label: "3",   x: 100, y: 165 },
   
 ];
 
 export const EDGES: Edge[] = [
-  { from: "first",  to: "second" },
-  { from: "second",  to: "third" },
+  { from: "First",  to: "Second" },
+  { from: "Second",  to: "Third" },
 
 ];
 

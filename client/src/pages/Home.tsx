@@ -3,7 +3,7 @@ import PoolMap from "../components/PoolMap";
 import GuardPickerModal from "../components/GuardPickerModal";
 import CreateGuardModal from "../components/CreateGuardModal";
 import type { Guard } from "../components/GuardPickerModal";
-import { POSITIONS } from "../data/poolLayout";
+import { POSITIONS, EDGES } from "../data/poolLayout";
 
 const today = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 type Assigned = Record<string, string | null>;
@@ -140,6 +140,64 @@ export default function Home() {
     fetchAssignments();
   }
 };
+// One rotation step: move along edges; drop if no outgoing edge
+const rotateOnce = async () => {
+  // Build a fresh map with all positions cleared
+  const base: Record<string, string | null> = {};
+  POSITIONS.forEach(p => (base[p.id] = null));
+
+  // Fast lookup for "from -> to"
+  const nextByFrom = new Map(EDGES.map(e => [e.from, e.to]));
+
+  // Compute new assignments
+  const next = { ...base };
+  for (const p of POSITIONS) {
+    const gid = assigned[p.id];
+    if (!gid) continue;
+
+    const to = nextByFrom.get(p.id);
+    if (to) {
+      next[to] = gid;        // move guard to the next slot
+    } else {
+      // no outgoing edge => break (dropped)
+      // intentionally do nothing
+    }
+  }
+
+  // Optimistic UI update
+  setAssigned(next);
+
+  // (Optional) Persist each slot to backend as the "current" snapshot
+  try {
+    const date = new Date().toISOString().slice(0, 10);   // YYYY-MM-DD
+    const time = new Date().toISOString().slice(11, 16);  // HH:MM
+
+    // Fire-and-forget; you can also await Promise.all if you prefer strict ordering
+    await Promise.all(
+      POSITIONS.map(p =>
+        fetch("/api/rotations/slot", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": "dev-key-123",
+          },
+          body: JSON.stringify({
+            date,
+            time,
+            stationId: p.id,
+            guardId: next[p.id], // may be string or null (clear)
+            notes: "rotate",
+          }),
+        })
+      )
+    );
+  } catch (e) {
+    console.error("Failed to persist rotation:", e);
+    // optional: re-sync from server
+    fetchAssignments();
+  }
+};
+const anyAssigned = Object.values(assigned).some(Boolean);
 
   return (
     <div className="min-h-screen bg-pool-800 text-white">
@@ -147,6 +205,13 @@ export default function Home() {
       <header className="h-16 flex items-center px-6 border-b border-pool-700 bg-pool-900">
         <h1 className="text-xl font-semibold">Lifeguard Rotation Manager</h1>
         <div className="ml-auto flex gap-2">
+      <button
+  onClick={rotateOnce}
+  disabled={!anyAssigned}
+  className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50 transition"
+>
+  Rotate
+</button>
           <button
             onClick={() => setCreateOpen(true)}
             className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 transition"
