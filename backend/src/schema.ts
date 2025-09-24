@@ -7,10 +7,10 @@ export const GuardCreate = z.object({
 export type GuardCreate = z.infer<typeof GuardCreate>;
 
 export const RotationSlot = z.object({
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  time: z.string().regex(/^\d{2}:\d{2}$/),
-  stationId: z.string().min(1),
-  guardId: z.string().min(1),
+  date: z.string(),          // "YYYY-MM-DD"
+  time: z.string(),          // "HH:MM"
+  stationId: z.string(),
+  guardId: z.string().nullable().optional(), // <- allow null
   notes: z.string().optional(),
 });
 export type RotationSlot = z.infer<typeof RotationSlot>;

@@ -25,7 +25,8 @@ router.post("/slot", async (req, res) => {
     const parsed = RotationSlot.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-    const { date, time, stationId, guardId, notes } = parsed.data;
+    const { date, time, stationId, guardId = null, notes } = parsed.data;
+
     await ddb.send(new PutCommand({
       TableName: TABLE,
       Item: {
@@ -33,11 +34,10 @@ router.post("/slot", async (req, res) => {
         sk: `SLOT#${time}#${stationId}`,
         type: "RotationSlot",
         stationId, guardId, time, date, notes,
-        gsi1pk: `GUARD#${guardId}`,
-        gsi1sk: `${date}T${time}`,
         updatedAt: new Date().toISOString(),
       },
     }));
+
     res.json({ ok: true });
   } catch (err) {
     console.error("POST /api/rotations/slot error:", err);
