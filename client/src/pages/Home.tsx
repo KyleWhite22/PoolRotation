@@ -33,14 +33,22 @@ export default function Home() {
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
   const [createOpen, setCreateOpen] = useState(false);
   const rotatingRef = useRef(false);
+const SIM_KEY = "simulatedNowISO";
 
   // start at 12:00 PM today (local)
   const [simulatedNow, setSimulatedNow] = useState(() => {
-    const d = new Date();
-    d.setHours(12, 0, 0, 0);
-    return d;
-  });
-
+  const saved = localStorage.getItem(SIM_KEY);
+  if (saved) {
+    const d = new Date(saved);
+    if (!isNaN(d.getTime())) return d;
+  }
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  return d;
+});
+useEffect(() => {
+  localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
+}, [simulatedNow]);
   // All API traffic must use this key (prevents UTC day drift)
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
