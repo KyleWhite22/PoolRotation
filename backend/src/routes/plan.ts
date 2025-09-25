@@ -26,7 +26,14 @@ async function loadGuards() {
     dob: it.dob,
   }));
 }
+// ---- Tick helpers (15-min ticks) -------------------------------------------
+// ---- Tick helpers
+function tickIndexFromISO(nowISO: string): number {
+  return Math.floor(Date.parse(nowISO) / (15 * 60 * 1000));
+}
 
+// DB/engine queue row type used in this routes file
+type QueueRow = { guardId: string; returnTo: string; enteredTick: number };
 /**
  * POST /api/plan/rotate
  * Body: { date: "YYYY-MM-DD", nowISO?: string, assignedSnapshot?: Record<string,string|null> }
@@ -37,7 +44,6 @@ router.post("/rotate", async (req, res) => {
   const date = req.body?.date;
   if (!date) return res.status(400).json({ error: "date required" });
 
-  // Load all SLOT rows for the day (consistent)
   const q = await ddb.send(new QueryCommand({
     TableName: TABLE,
     KeyConditionExpression: "pk = :pk",
@@ -47,7 +53,6 @@ router.post("/rotate", async (req, res) => {
 
   const slots = (q.Items ?? []).filter(it => it.type === "RotationSlot");
 
-  // 1) Pick the latest frame by updatedAt (ISO)
   let latestTickISO: string | null = null;
   for (const it of slots) {
     const u = String(it.updatedAt ?? "");
@@ -55,10 +60,9 @@ router.post("/rotate", async (req, res) => {
     if (!latestTickISO || u > latestTickISO) latestTickISO = u;
   }
 
-  // 2) Build assigned from ONLY the latest frame; else bootstrap from client
-  const assigned: Record<string, string | null> =
+  // Build from DB or client snapshot
+  const assignedFromDb: Record<string, string | null> =
     Object.fromEntries(POSITIONS.map(p => [p.id, null as string | null]));
-
   if (latestTickISO) {
     for (const it of slots) {
       if (String(it.updatedAt ?? "") !== latestTickISO) continue;
@@ -66,17 +70,31 @@ router.post("/rotate", async (req, res) => {
       if (!sid) continue;
       let gid = it.guardId ?? null;
       if (typeof gid === "string" && gid.startsWith("GUARD#")) gid = gid.slice(6);
-      assigned[sid] = gid;
-    }
-  } else {
-    const clientAssigned = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null>;
-    for (const [sid, gid] of Object.entries(clientAssigned)) {
-      if (!gid) continue;
-      assigned[sid] = gid.startsWith?.("GUARD#") ? gid.slice(6) : gid;
+      assignedFromDb[sid] = gid;
     }
   }
 
-  // 3) Guards / breaks (passed through)
+  const clientAssigned = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null>;
+
+  // ---- NEW: choose a SAFE assigned frame ----
+  const countNonNull = (m: Record<string, string | null>) =>
+    Object.values(m).reduce((n, v) => n + (v ? 1 : 0), 0);
+  const clientNormalized: Record<string, string | null> = {};
+  for (const [sid, gid] of Object.entries(clientAssigned)) {
+    clientNormalized[sid] = gid?.startsWith?.("GUARD#") ? gid.slice(6) : gid ?? null;
+  }
+
+  // Prefer DB frame if it has data; otherwise use client snapshot
+  const assigned = countNonNull(assignedFromDb) > 0 ? assignedFromDb : clientNormalized;
+
+  // ---- NEW: lightweight debug (safe in dev) ----
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[rotate.debug] latestTickISO:", latestTickISO,
+      "dbCount:", countNonNull(assignedFromDb),
+      "clientCount:", countNonNull(clientNormalized));
+  }
+
+  // guards/breaks as before...
   const guards = await loadGuards();
   const breaksItem = await ddb.send(new GetCommand({
     TableName: TABLE,
@@ -84,13 +102,31 @@ router.post("/rotate", async (req, res) => {
   }));
   const breaks = (breaksItem.Item?.breaks ?? {}) as Record<string, string>;
 
-  // 4) Compute next state (engine can use req.body.nowISO if it wants logical time)
   const nowISO = req.body?.nowISO ?? new Date().toISOString();
 
-  // Load today's queue and pass it to the engine (even if engine is pass-through for now)
   const rosterIds = new Set(guards.map(g => g.id));
-  const queue = await loadQueue(date, rosterIds);
+  const queue = await loadQueue(date, rosterIds, tickIndexFromISO(nowISO));
+
   const out = computeNext({ assigned, guards, breaks, queue, nowISO });
+  // in /api/plan/rotate, right after `const out = computeNext(...)`
+if (process.env.NODE_ENV !== "production") {
+  const assignedIn  = Object.values(assigned).filter(Boolean).length;
+  const assignedOut = Object.values(out.nextAssigned).filter(Boolean).length;
+  const queueLen    = out.meta.breakQueue.length;
+  console.log("[rotate.debug]", { period: out.meta.period, assignedIn, assignedOut, queueLen });
+}
+  (function invariantChecks() {
+  const seated = new Set<string>();
+  for (const gid of Object.values(out.nextAssigned)) {
+    if (!gid) continue;
+    if (seated.has(gid)) console.warn("[invariant] duplicate seated guard", gid);
+    seated.add(gid);
+  }
+  for (const q of out.meta.breakQueue) {
+    if (seated.has(q.guardId)) console.warn("[invariant] seated guard still in queue", q.guardId);
+  }
+})();
+
   // 5) MONOTONIC WRITE TIMESTAMP (server authoritative)
   const serverNow = new Date();
   let writeUpdatedAt = serverNow.toISOString();
@@ -133,7 +169,7 @@ await ddb.send(new PutCommand({
     assigned: out.nextAssigned,
     breaks: out.nextBreaks,
     conflicts: out.conflicts,
-    meta: { period: "ALL_AGES", breakQueue: out.meta.breakQueue },
+    meta: { period: out.meta.period, breakQueue: out.meta.breakQueue },
     nowISO,
   });
 });
@@ -143,31 +179,37 @@ await ddb.send(new PutCommand({
 const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort(
   (a, b) => Number(a) - Number(b)
 );
-
 function sanitizeQueue(
   queue: any[],
-  rosterIds: Set<string>
-): { guardId: string; returnTo: string }[] {
+  rosterIds: Set<string>,
+  currentTick?: number
+): QueueRow[] {
   const seen = new Set<string>();
-  const out: { guardId: string; returnTo: string }[] = [];
+  const out: QueueRow[] = [];
   for (const raw of Array.isArray(queue) ? queue : []) {
     const gid = stripGuard(raw?.guardId);
     const sec = String(raw?.returnTo ?? "");
+    const etRaw = (raw as any)?.enteredTick;
+    const enteredTick =
+      typeof etRaw === "number" && Number.isFinite(etRaw)
+        ? etRaw
+        : (typeof currentTick === "number" ? currentTick : 0); // default: must wait 1 full tick
     if (!gid || !rosterIds.has(gid)) continue;
-    if (!SECTIONS.includes(sec)) continue; // must be a real section like "1","2","3","4"
+    if (!SECTIONS.includes(sec)) continue;
     if (seen.has(gid)) continue;
     seen.add(gid);
-    out.push({ guardId: gid, returnTo: sec });
+    out.push({ guardId: gid, returnTo: sec, enteredTick });
   }
   return out;
 }
 
-async function loadQueue(date: string, rosterIds: Set<string>) {
+
+async function loadQueue(date: string, rosterIds: Set<string>, currentTick?: number) {
   const item = await ddb.send(new GetCommand({
     TableName: TABLE,
     Key: { pk: `ROTATION#${date}`, sk: "QUEUE" },
   }));
-  return sanitizeQueue(item.Item?.queue ?? [], rosterIds);
+  return sanitizeQueue(item.Item?.queue ?? [], rosterIds, currentTick);
 }
 
 // Build a coherent "assigned" snapshot from the latest frame (same updatedAt)
@@ -223,7 +265,7 @@ router.get("/queue", async (req, res) => {
 
 // --- POST /api/plan/queue-add ------------------------------------------------
 router.post("/queue-add", async (req, res) => {
-  const date = req.body?.date;
+   const date = req.body?.date;
   const guardId = stripGuard(req.body?.guardId);
   const returnTo = String(req.body?.returnTo ?? "");
   if (!date || !guardId || !returnTo) {
@@ -258,14 +300,16 @@ router.post("/queue-add", async (req, res) => {
   }
 
   // read current queue, dedupe, idempotent add
-  const qNow = await loadQueue(date, rosterIds);
+ 
+  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const currentTick = tickIndexFromISO(nowISO);
+
+  const qNow = await loadQueue(date, rosterIds, currentTick);
   if (qNow.some(e => e.guardId === guardId)) {
     return res.json({ ok: true, queue: qNow });
   }
-  const nextQueue = [...qNow, { guardId, returnTo }];
+  const nextQueue: QueueRow[] = [...qNow, { guardId, returnTo, enteredTick: currentTick }];
 
-  // persist
-  const nowISO = new Date().toISOString();
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
@@ -306,8 +350,14 @@ router.post("/autopopulate", async (req, res) => {
   const date = req.body?.date;
   if (!date) return res.status(400).json({ error: "date required" });
 
-  const nowISO = new Date().toISOString();
-  const time = nowISO.slice(11, 19); // HH:MM:SS
+  // 🔧 use client-simulated time if provided
+  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const time = nowISO.slice(11, 19);
+  const currentTick = tickIndexFromISO(nowISO);
+
+  // ... roster & seats unchanged ...
+
+
 
   // 1) Roster
   const guardsScan = await ddb.send(new ScanCommand({
@@ -345,11 +395,12 @@ router.post("/autopopulate", async (req, res) => {
   const seatedSet = new Set<string>(seatGuardIds.filter(Boolean));
   const bench = guardIds.filter(id => !seatedSet.has(id));
 
-  const queue: Array<{ guardId: string; returnTo: string }> = [];
+  // Queue: one per section
+  const queue: QueueRow[] = [];
   let bi = 0;
   for (const sec of SECTIONS) {
     if (bi < bench.length) {
-      queue.push({ guardId: bench[bi++], returnTo: sec }); // one per section
+      queue.push({ guardId: bench[bi++], returnTo: sec, enteredTick: currentTick });
     }
   }
 

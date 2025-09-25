@@ -9,7 +9,7 @@ import { POSITIONS } from "../../../shared/data/poolLayout.js";
 type Assigned = Record<string, string | null>;
 type BreakState = Record<string, string>; // guardId -> breakUntilISO
 type ConflictUI = { stationId: string; guardId: string; reason: string };
-type QueueEntry = { guardId: string; returnTo: string };
+type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
 
 // Local YYYY-MM-DD based on your simulated clock (NY time to match ops)
 const ymdLocal = (d: Date) =>
@@ -178,7 +178,7 @@ useEffect(() => {
       await fetch("/api/plan/queue-add", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({ date: dayKey, guardId, returnTo }),
+          body: JSON.stringify({ date: dayKey, guardId, returnTo, nowISO: simulatedNow.toISOString() }),
       });
       await fetchQueue();
     } catch (e) {
@@ -264,7 +264,7 @@ useEffect(() => {
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({ date: dayKey }),
+        body: JSON.stringify({ date: dayKey, nowISO: simulatedNow.toISOString()  }),
       });
       const data = await res.json();
       if (data?.assigned) setAssigned(data.assigned);

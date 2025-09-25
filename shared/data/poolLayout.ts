@@ -1,3 +1,4 @@
+//poolLayout.ts
 export type Position = {
   id: string;
   label: string;
