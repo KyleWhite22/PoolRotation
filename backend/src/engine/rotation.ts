@@ -204,21 +204,24 @@ if (adult) {
 
 
 
-  // ===== NORMAL TICK =====
-  // 1) End-of-section → enqueue into NEXT section
-  const toEnqueue: Array<{ sec: string; gid: string }> = [];
-  for (const seat of Object.keys(assigned)) {
+// ===== NORMAL TICK =====
+// 1) End-of-section → enqueue into NEXT section (unchanged)
+const toEnqueue: Array<{ sec: string; gid: string }> = [];
+for (const seat of Object.keys(assigned)) {
   const gid = assigned[seat];
   if (!gid) continue;
   if (lastSeatSet.has(seat)) {
     const curSec = sectionBySeat[seat];
     const nextSec = nextSectionId(curSec);
-    qBuckets[nextSec].push({ guardId: gid, returnTo: nextSec, enteredTick: currentTick });
+    toEnqueue.push({ sec: nextSec, gid });
   }
 }
+for (const item of toEnqueue) {
+  qBuckets[item.sec].push({ guardId: item.gid, returnTo: item.sec, enteredTick: currentTick });
+}
 
-  // 2) Advance within each section (rightward), skipping vacated tails
-  for (const s of SECTIONS) {
+// 2) Advance within each section (unchanged)
+for (const s of SECTIONS) {
   const seats = seatsBySection[s];
   for (let i = seats.length - 1; i >= 1; i--) {
     const from = seats[i - 1];
@@ -229,31 +232,55 @@ if (adult) {
     seatedThisTick.add(gid);
   }
 }
-  // 3) Refill first seat from the section queue if guard has waited >= 1 full tick
-  for (const s of SECTIONS) {
-    const entrySeat = firstSeatBySection[s];
-    if (nextAssigned[entrySeat]) continue; // already filled by advance
-    const bucket = qBuckets[s];
-    const idx = bucket.findIndex((e) => e.enteredTick < currentTick);
-    if (idx !== -1) {
+
+// 3) Refill from queue
+// If previous tick was adult swim (:45), refill ALL empty seats from that section’s queue;
+// otherwise (ordinary tick), only fill the first seat.
+const prevWasAdult = (((currentTick - 1) % 4) + 4) % 4 === 3;
+
+for (const s of SECTIONS) {
+  const seats = seatsBySection[s];
+  const bucket = qBuckets[s];
+
+  if (prevWasAdult) {
+    // Fill every empty seat left-to-right from eligible queue entries
+    for (const seat of seats) {
+      if (nextAssigned[seat]) continue; // already filled by step 2
+      const idx = bucket.findIndex(
+        e => e.enteredTick < currentTick && !seatedThisTick.has(e.guardId)
+      );
+      if (idx === -1) break; // no more eligible guards for this section
       const [entry] = bucket.splice(idx, 1);
-      nextAssigned[entrySeat] = entry.guardId;
+      nextAssigned[seat] = entry.guardId;
       seatedThisTick.add(entry.guardId);
     }
-  }
-
-  // 4) Build output queue: keep order, dedupe by guardId, drop anyone seated now
-  const outQueue: QueueEntry[] = [];
-  const seen = new Set<string>();
-  for (const s of SECTIONS) {
-    for (const q of qBuckets[s]) {
-      if (seatedThisTick.has(q.guardId)) continue; // seated this frame
-      if (seen.has(q.guardId)) continue;
-      seen.add(q.guardId);
-      outQueue.push(q);
+  } else {
+    // Original behavior: only entry seat pulls one
+    const entrySeat = seats[0];
+    if (!nextAssigned[entrySeat]) {
+      const idx = bucket.findIndex(
+        e => e.enteredTick < currentTick && !seatedThisTick.has(e.guardId)
+      );
+      if (idx !== -1) {
+        const [entry] = bucket.splice(idx, 1);
+        nextAssigned[entrySeat] = entry.guardId;
+        seatedThisTick.add(entry.guardId);
+      }
     }
   }
+}
 
+// 4) Build outgoing queue (unchanged)
+const outQueue: QueueEntry[] = [];
+const seen = new Set<string>();
+for (const s of SECTIONS) {
+  for (const q of qBuckets[s]) {
+    if (seatedThisTick.has(q.guardId)) continue; // anyone seated this frame is removed
+    if (seen.has(q.guardId)) continue;
+    seen.add(q.guardId);
+    outQueue.push(q);
+  }
+}
 
 
   return {
