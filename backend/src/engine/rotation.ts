@@ -217,7 +217,11 @@ for (const seat of Object.keys(assigned)) {
   }
 }
 for (const item of toEnqueue) {
-  qBuckets[item.sec].push({ guardId: item.gid, returnTo: item.sec, enteredTick: currentTick });
+  qBuckets[item.sec].push({
+  guardId: item.gid,
+  returnTo: item.sec,
+  enteredTick: currentTick - 1, // ensures enteredTick < currentTick
+});
 }
 
 // 2) Advance within each section (unchanged)
@@ -239,23 +243,35 @@ for (const s of SECTIONS) {
 const prevWasAdult = (((currentTick - 1) % 4) + 4) % 4 === 3;
 
 for (const s of SECTIONS) {
-  const seats = seatsBySection[s];
+  const seats  = seatsBySection[s];
   const bucket = qBuckets[s];
-
+if (process.env.NODE_ENV !== "production") {
+  console.log("[refill.debug]", {
+    tick: currentTick,
+    prevWasAdult,
+    section: s,
+    seatsBefore: seats.map(seat => ({ seat, guard: nextAssigned[seat] ?? "—" })),
+    bucketBefore: bucket.map(q => `${q.guardId}(tick:${q.enteredTick})`),
+  });
+}
   if (prevWasAdult) {
-    // Fill every empty seat left-to-right from eligible queue entries
-    for (const seat of seats) {
-      if (nextAssigned[seat]) continue; // already filled by step 2
+    // After adult swim: fill ALL empty seats right -> left (not just the suffix)
+    for (let i = seats.length - 1; i >= 0; i--) {
+      const seat = seats[i];
+      if (nextAssigned[seat]) continue; // already occupied after the normal shift
+
+      // Pull the first eligible queue guard (FIFO) who waited at least one full tick
       const idx = bucket.findIndex(
         e => e.enteredTick < currentTick && !seatedThisTick.has(e.guardId)
       );
-      if (idx === -1) break; // no more eligible guards for this section
+      if (idx === -1) break; // no more eligible in this section
+
       const [entry] = bucket.splice(idx, 1);
       nextAssigned[seat] = entry.guardId;
       seatedThisTick.add(entry.guardId);
     }
   } else {
-    // Original behavior: only entry seat pulls one
+    // Ordinary tick: only the entry seat pulls one (original logic)
     const entrySeat = seats[0];
     if (!nextAssigned[entrySeat]) {
       const idx = bucket.findIndex(
@@ -270,6 +286,9 @@ for (const s of SECTIONS) {
   }
 }
 
+
+
+
 // 4) Build outgoing queue (unchanged)
 const outQueue: QueueEntry[] = [];
 const seen = new Set<string>();
@@ -281,7 +300,22 @@ for (const s of SECTIONS) {
     outQueue.push(q);
   }
 }
-
+if (process.env.NODE_ENV !== "production") {
+  console.log("[rotation.debug] RESULT", {
+    tick: currentTick,
+    period: adult ? "ADULT_SWIM" : "ALL_AGES",
+    assigned: Object.entries(nextAssigned).map(([seat, guard]) => ({
+      seat,
+      guard: guard ?? "—",
+    })),
+    queues: SECTIONS.map(s => ({
+      section: s,
+      queue: qBuckets[s].map(q =>
+        `${q.guardId}(tick:${q.enteredTick})`
+      ),
+    })),
+  });
+}
 
   return {
     nextAssigned,

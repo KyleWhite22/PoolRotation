@@ -88,11 +88,11 @@ router.post("/rotate", async (req, res) => {
   const assigned = countNonNull(assignedFromDb) > 0 ? assignedFromDb : clientNormalized;
 
   // ---- NEW: lightweight debug (safe in dev) ----
-  if (process.env.NODE_ENV !== "production") {
+ /* if (process.env.NODE_ENV !== "production") {
     console.log("[rotate.debug] latestTickISO:", latestTickISO,
       "dbCount:", countNonNull(assignedFromDb),
       "clientCount:", countNonNull(clientNormalized));
-  }
+  }*/
 
   // guards/breaks as before...
   const guards = await loadGuards();
