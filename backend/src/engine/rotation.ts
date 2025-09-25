@@ -110,12 +110,7 @@ for (const raw of queue) {
   const seatedThisTick = new Set<string>();
 if (adult) {
   // ===== ADULT SWIM TICK =====
-  // Step A) Do a normal shift first (like a normal tick):
-  // - Tails enqueue to NEXT section (enteredTick = currentTick)
-  // - Within each section, everybody advances right by one
-  // - Do NOT pull from queue on adult tick
-
-  // A1: tail -> enqueue to next section
+  // Step A) Normal shift first: tails enqueue to NEXT section, then shift within each section
   for (const seat of Object.keys(assigned)) {
     const gid = assigned[seat];
     if (!gid) continue;
@@ -127,7 +122,6 @@ if (adult) {
     }
   }
 
-  // A2: advance within each section (build a shifted snapshot)
   const shifted: Assigned = Object.fromEntries(POSITIONS.map(p => [p.id, null as string | null]));
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
@@ -140,57 +134,74 @@ if (adult) {
     }
   }
 
-  // Step B) Apply adult-swim rules to the shifted snapshot:
-  // - Keep guards in REST_STATIONS seated
-  // - Everyone else is queued (to their own section) for the adult-swim period
-  const queuedOutAdult: QueueEntry[] = [];
-  const seenQueued = new Set<string>();     // dedupe by guardId
-  const seatedNowAdult = new Set<string>(); // who we keep seated (rest only)
+  // Step B) Apply adult-swim: keep rest seats staffed; everyone else queues.
+  // Special case: if the entry seat is a rest seat and empty after shift, pull from that section's queue (eligible only).
+  const seatedNowAdult = new Set<string>(); // guards we keep seated (rest only)
 
-  // Start with whatever was already in qBuckets (tails + previous queue contents)
+  // 1) Per-section: ensure entry rest seat is filled (from shift or queue)
   for (const s of SECTIONS) {
-    for (const q of qBuckets[s]) {
-      if (!seenQueued.has(q.guardId)) {
-        seenQueued.add(q.guardId);
-        queuedOutAdult.push(q);
+    const entrySeat = seatsBySection[s][0];
+    const entryIsRest = REST_STATIONS.has(entrySeat);
+
+    if (entryIsRest) {
+      if (shifted[entrySeat]) {
+        // Someone rotated into entry rest seat; keep them seated
+        const gid = shifted[entrySeat]!;
+        nextAssigned[entrySeat] = gid;
+        seatedNowAdult.add(gid);
+      } else {
+        // Entry rest is empty: pull first eligible from this section's queue
+        const bucket = qBuckets[s];
+        const idx = bucket.findIndex(e => e.enteredTick < currentTick); // waited ≥ 1 tick
+        if (idx !== -1) {
+          const [head] = bucket.splice(idx, 1);
+          nextAssigned[entrySeat] = head.guardId;
+          seatedNowAdult.add(head.guardId);
+        }
       }
     }
-    // Clear buckets; we'll rebuild the output list below
-    qBuckets[s] = [];
   }
 
-  // Build nextAssigned: only rest seats from the shifted frame
+  // 2) For all other rest seats (non-entry) — keep whoever rotated into them
   for (const seat of Object.keys(shifted)) {
+    if (!REST_STATIONS.has(seat)) continue;               // rest seats only
+    if (nextAssigned[seat]) continue;                     // already handled entry rest above
     const gid = shifted[seat];
     if (!gid) continue;
-    if (REST_STATIONS.has(seat)) {
-      nextAssigned[seat] = gid;     // stays staffed during adult swim
-      seatedNowAdult.add(gid);
-    } else {
-      // Non-rest: goes to queue for their own section
-      const sec = sectionBySeat[seat];
-      const entry: QueueEntry = { guardId: gid, returnTo: sec, enteredTick: currentTick };
-      if (!seenQueued.has(gid)) {
-        seenQueued.add(gid);
-        queuedOutAdult.push(entry);
-      }
-    }
+    nextAssigned[seat] = gid;                             // stays put during adult swim
+    seatedNowAdult.add(gid);
   }
 
-  // Final: drop any guard that is seated (rest) from the outgoing queue (safety)
-  const filteredQueue: QueueEntry[] = [];
-  for (const q of queuedOutAdult) {
-    if (seatedNowAdult.has(q.guardId)) continue;
-    filteredQueue.push(q);
+  // 3) Everyone else (non-rest seats in the shifted snapshot) → queue (to their own section)
+  //    enteredTick = currentTick (they start their adult-swim break now)
+  for (const seat of Object.keys(shifted)) {
+    if (REST_STATIONS.has(seat)) continue;                // rest handled already
+    const gid = shifted[seat];
+    if (!gid) continue;
+    const sec = sectionBySeat[seat];
+    qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: currentTick });
+  }
+
+  // 4) Build outgoing queue: keep order by section bucket; dedupe; drop any seated-at-rest
+  const seen = new Set<string>();
+  const queuedOutAdult: QueueEntry[] = [];
+  for (const s of SECTIONS) {
+    for (const q of qBuckets[s]) {
+      if (seatedNowAdult.has(q.guardId)) continue; // don't queue someone we seated at rest
+      if (seen.has(q.guardId)) continue;           // dedupe by guardId
+      seen.add(q.guardId);
+      queuedOutAdult.push(q);
+    }
   }
 
   return {
     nextAssigned,
     nextBreaks: breaks,
     conflicts: [],
-    meta: { period: "ADULT_SWIM", breakQueue: filteredQueue },
+    meta: { period: "ADULT_SWIM", breakQueue: queuedOutAdult },
   };
 }
+
 
 
   // ===== NORMAL TICK =====
