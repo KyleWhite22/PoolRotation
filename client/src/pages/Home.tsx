@@ -27,40 +27,56 @@ export default function Home() {
   const [breaks, setBreaks] = useState<BreakState>({});
   const [conflicts, setConflicts] = useState<ConflictUI[]>([]);
   const [breakQueue, setBreakQueue] = useState<QueueEntry[]>([]);
+  const [queuesBySection, setQueuesBySection] = useState<Record<string, QueueEntry[]>>({});
 
   // --- UI state ---
   const [pickerFor, setPickerFor] = useState<string | null>(null); // seat assignment
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
   const [createOpen, setCreateOpen] = useState(false);
+
   const rotatingRef = useRef(false);
-const SIM_KEY = "simulatedNowISO";
+  const SIM_KEY = "simulatedNowISO";
 
   // start at 12:00 PM today (local)
   const [simulatedNow, setSimulatedNow] = useState(() => {
-  const saved = localStorage.getItem(SIM_KEY);
-  if (saved) {
-    const d = new Date(saved);
-    if (!isNaN(d.getTime())) return d;
-  }
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  return d;
-});
-useEffect(() => {
-  localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
-}, [simulatedNow]);
+    const saved = localStorage.getItem(SIM_KEY);
+    if (saved) {
+      const d = new Date(saved);
+      if (!isNaN(d.getTime())) return d;
+    }
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    return d;
+  });
+  useEffect(() => {
+    localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
+  }, [simulatedNow]);
+
   // All API traffic must use this key (prevents UTC day drift)
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
   // --- Derived ---
-  const usedGuardIds = useMemo(
-    () => Object.values(assigned).filter((v): v is string => Boolean(v)),
-    [assigned]
-  );
-  const alreadyQueuedIds = useMemo(
-    () => new Set(breakQueue.map((q) => q.guardId)),
-    [breakQueue]
-  );
+const usedGuardIds = useMemo(
+  () => Object.values(assigned).filter((v): v is string => Boolean(v)),
+  [assigned]
+);
+
+  // Set is handy for fast lookups
+const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
+
+const alreadyQueuedIds = useMemo(
+  () => new Set(breakQueue.map((q) => q.guardId)),
+  [breakQueue]
+);
+
+  // count total queued from buckets (preferred) or flat list (fallback)
+  const totalQueued = useMemo(() => {
+    const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
+      (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+      0
+    );
+    return bucketTotals > 0 ? bucketTotals : breakQueue.length;
+  }, [queuesBySection, breakQueue]);
 
   // -------- Data funcs --------
   const normalizeGuards = (items: any[]): Guard[] =>
@@ -113,13 +129,37 @@ useEffect(() => {
     });
   };
 
-  const fetchQueue = async () => {
-    const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
-      headers: { "x-api-key": "dev-key-123" },
-    });
-    const data = await res.json();
-    setBreakQueue(Array.isArray(data?.queue) ? data.queue : []);
-  };
+  const sections = useMemo(
+    () => Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort((a, b) => Number(a) - Number(b)),
+    []
+  );
+
+  // before: const fetchQueue = async () => {
+const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
+  const keepBuckets = !!opts?.keepBuckets;
+
+  const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
+    headers: { "x-api-key": "dev-key-123" },
+  });
+  const data = await res.json();
+  const flat: QueueEntry[] = Array.isArray(data?.queue) ? data.queue : [];
+  setBreakQueue(flat);
+
+  if (!keepBuckets) {
+    // seed buckets from the flat list (fallback before first rotate/autopopulate)
+    const sections = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
+      (a, b) => Number(a) - Number(b)
+    );
+    const buckets: Record<string, QueueEntry[]> = {};
+    for (const s of sections) buckets[s] = [];
+    for (const q of flat) {
+      const sec = String(q.returnTo ?? "");
+      if (!buckets[sec]) buckets[sec] = [];
+      buckets[sec].push(q);
+    }
+    setQueuesBySection(buckets);
+  }
+};
 
   // -------- Effects --------
   useEffect(() => {
@@ -178,7 +218,7 @@ useEffect(() => {
       await fetch("/api/plan/queue-add", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-          body: JSON.stringify({ date: dayKey, guardId, returnTo, nowISO: simulatedNow.toISOString() }),
+        body: JSON.stringify({ date: dayKey, guardId, returnTo, nowISO: simulatedNow.toISOString() }),
       });
       await fetchQueue();
     } catch (e) {
@@ -186,34 +226,38 @@ useEffect(() => {
     }
   };
 
- const plus15Minutes = async () => {
-  if (rotatingRef.current) return;
-  rotatingRef.current = true;
-  try {
-    const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
-    setSimulatedNow(newNow);
+  const plus15Minutes = async () => {
+    if (rotatingRef.current) return;
+    rotatingRef.current = true;
+    try {
+      const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
+      setSimulatedNow(newNow);
 
-    const res = await fetch("/api/plan/rotate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-      body: JSON.stringify({
-        date: dayKey,                 // or todayISO() if you prefer
-        nowISO: newNow.toISOString(),
-        assignedSnapshot: assigned,   // <- REQUIRED
-      }),
-    });
+      const res = await fetch("/api/plan/rotate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({
+          date: dayKey,
+          nowISO: newNow.toISOString(),
+          assignedSnapshot: assigned, // <- REQUIRED
+        }),
+      });
 
-    const data = await res.json();
-    if (data?.assigned) setAssigned(data.assigned);
-    if (data?.breaks) setBreaks(data.breaks);
-    if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
-     await fetchQueue();
-  } catch (e) {
-    console.error("Rotate failed:", e);
-  } finally {
-    rotatingRef.current = false;
-  }
-};
+      const data = await res.json();
+      if (data?.assigned) setAssigned(data.assigned);
+      if (data?.breaks) setBreaks(data.breaks);
+      if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+      if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
+// refresh flat list but DO NOT overwrite buckets we just set
+await fetchQueue({ keepBuckets: true });
+      // keep flat list in sync (fallback + persistence)
+      await fetchQueue();
+    } catch (e) {
+      console.error("Rotate failed:", e);
+    } finally {
+      rotatingRef.current = false;
+    }
+  };
 
   const handleRefreshAll = async () => {
     // reset clock back to noon
@@ -223,6 +267,7 @@ useEffect(() => {
 
     // clear UI state
     setBreakQueue([]);
+    setQueuesBySection({});
     setAssigned(Object.fromEntries(POSITIONS.map((p) => [p.id, null])));
     setBreaks({});
 
@@ -264,13 +309,14 @@ useEffect(() => {
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({ date: dayKey, nowISO: simulatedNow.toISOString()  }),
+        body: JSON.stringify({ date: dayKey, nowISO: simulatedNow.toISOString() }),
       });
       const data = await res.json();
       if (data?.assigned) setAssigned(data.assigned);
-      if (Array.isArray(data?.meta?.breakQueue)) setBreakQueue(data.meta.breakQueue);
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+      if (Array.isArray(data?.meta?.breakQueue)) setBreakQueue(data.meta.breakQueue);
+      if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
     } catch (e) {
       console.error("Autopopulate failed:", e);
     }
@@ -278,15 +324,31 @@ useEffect(() => {
 
   // -------- UI helpers --------
   const anyAssigned = Object.values(assigned).some(Boolean);
+// helper: find the entry seat id for a section (e.g. "1.1")
+const entrySeatId = (sec: string) => {
+  const seats = POSITIONS
+    .map(p => p.id)
+    .filter(id => id.startsWith(sec + "."))
+    .sort((a, b) => Number(a.split(".")[1]) - Number(b.split(".")[1]));
+  return seats[0]; // first seat in section
+};
 
-  // simple numbered queue display (always show all sections found in POSITIONS)
-  const sections = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
-    (a, b) => Number(a) - Number(b)
-  );
+const guardName = (gid: string) => guards.find((g) => g.id === gid)?.name ?? gid;
 
-  const guardName = (gid: string) => guards.find((g) => g.id === gid)?.name ?? gid;
-  const queueBySection = (sec: string) =>
-    breakQueue.filter((q) => q.returnTo === sec).map((q) => guardName(q.guardId));
+// prefer engine buckets; fallback to flat list; if still empty, show entry-seat occupant
+const queueNamesBySection = (sec: string) => {
+  const bucket = queuesBySection?.[sec];
+  // prefer engine buckets; fallback to flat list for this section
+  const raw = bucket && bucket.length > 0
+    ? bucket
+    : breakQueue.filter((q) => q.returnTo === sec);
+
+  // UI-only filter: hide any guard who is currently seated
+  const visible = raw.filter((q) => !seatedSet.has(q.guardId));
+
+  // no “(on seat)” fallback; if empty, the UI will show an em dash
+  return visible.map((q) => guardName(q.guardId));
+};
 
   return (
     <div className="min-h-screen bg-pool-800 text-white">
@@ -300,7 +362,7 @@ useEffect(() => {
           <button
             type="button"
             onClick={plus15Minutes}
-            disabled={rotatingRef.current || (!anyAssigned && breakQueue.length === 0)}
+            disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
             className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50 transition"
           >
             +15 Minutes
@@ -357,6 +419,7 @@ useEffect(() => {
                     body: JSON.stringify({ date: dayKey }),
                   });
                   setBreakQueue([]);
+                  setQueuesBySection({});
                 } catch (e) {
                   console.error("Failed to clear queues:", e);
                 }
@@ -368,7 +431,7 @@ useEffect(() => {
 
           <ul className="space-y-2">
             {sections.map((sec) => {
-              const names = queueBySection(sec);
+              const names = queueNamesBySection(sec);
               return (
                 <li key={sec} className="flex items-center gap-3">
                   <span className="w-6 text-right font-mono text-slate-300">{sec}.</span>
