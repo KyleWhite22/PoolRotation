@@ -100,34 +100,34 @@ router.post("/rotate", async (req, res) => {
   const time = writeUpdatedAt.slice(11, 19); // "HH:MM:SS"
 
   // 6) Persist snapshot rows for this new frame
-  for (const [stationId, guardId] of Object.entries(out.nextAssigned)) {
-    await ddb.send(new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: `SLOT#${time}#${stationId}`,
-        type: "RotationSlot",
-        stationId,
-        guardId: guardId ?? null,
-        time,                // same HH:MM:SS for the frame
-        date,
-        notes: "rotate-ring",
-        updatedAt: writeUpdatedAt, // strictly newer than last frame
-      },
-    }));
-  }
-
-  // BREAKS row (fresh timestamp so clients always see a current frame marker)
+for (const [stationId, guardId] of Object.entries(out.nextAssigned)) {
   await ddb.send(new PutCommand({
     TableName: TABLE,
     Item: {
       pk: `ROTATION#${date}`,
-      sk: "BREAKS",
-      type: "Breaks",
-      breaks: out.nextBreaks,
-      updatedAt: writeUpdatedAt,
+      sk: `SLOT#${time}#${stationId}`,
+      type: "RotationSlot",
+      stationId,
+      guardId: guardId ?? null,
+      time,                // same HH:MM:SS for the frame
+      date,
+      notes: "rotate-ring+queue",
+      updatedAt: writeUpdatedAt, // strictly newer than last frame
     },
   }));
+}
+
+// Persist updated queue once (outside the loop!)
+await ddb.send(new PutCommand({
+  TableName: TABLE,
+  Item: {
+    pk: `ROTATION#${date}`,
+    sk: "QUEUE",
+    type: "Queue",
+    queue: out.meta.breakQueue,
+    updatedAt: writeUpdatedAt,
+  },
+}));
 
   res.json({
     assigned: out.nextAssigned,
