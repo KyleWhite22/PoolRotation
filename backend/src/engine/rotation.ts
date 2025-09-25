@@ -1,68 +1,78 @@
-// backend/src/engine/rotation.ts
-import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_STATIONS }
-  from "../../../shared/data/poolLayout.js";
+console.log("[engine/rotation] LOADED");
+import { POSITIONS } from "../../../shared/data/poolLayout.js";
 
 export type Guard = { id: string; name: string; dob: string };
 export type Assigned = Record<string, string | null>;
 export type BreakState = Record<string, string>;
 export type Conflict = { stationId: string; reason: "AGE_RULE"; guardId: string };
+export type QueueEntry = { guardId: string; returnTo: string };
 
-const NEXT_BY_FROM = new Map<string, string>(EDGES.map((e) => [e.from, e.to]));
+// Build sections and seats-in-section in numeric order
+const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort(
+  (a, b) => Number(a) - Number(b)
+);
 
-type Period = "ALL_AGES" | "ADULTS_ONLY";
+const seatsBySection: Record<string, string[]> = (() => {
+  const map: Record<string, string[]> = {};
+  for (const s of SECTIONS) map[s] = [];
+  for (const p of POSITIONS) {
+    const [sec] = p.id.split(".");
+    map[sec].push(p.id);
+  }
+  for (const s of SECTIONS) {
+    map[s].sort((a, b) => Number(a.split(".")[1]) - Number(b.split(".")[1]));
+  }
+  return map;
+})();
 
-function periodOfNow(now = new Date()): Period {
-  return now.getMinutes() < 45 ? "ALL_AGES" : "ADULTS_ONLY";
-}
+// Global ring: [1.1,1.2,1.3, 2.1,2.2,2.3, 3.1,3.2,3.3, 4.1,4.2]
+const RING: string[] = SECTIONS.flatMap(sec => seatsBySection[sec]);
 
-// TEST-SAFE engine:
-// - Pure wrap movement
-// - Adults-only at :45 clears non-rest stations
-// - No break timers, no age-rule enforcement
 export type EngineOutput = {
   nextAssigned: Assigned;
   nextBreaks: BreakState;
   conflicts: Conflict[];
-  meta: { period: Period };
+  meta: { period: "ALL_AGES"; breakQueue: QueueEntry[] };
 };
 
+// Everyone moves to the next seat in the ring (wrap around).
 export function rotateOnceEngine(
   assigned: Assigned,
   _guards: Guard[],
   breaks: BreakState,
-  now = new Date()
+  _now = new Date(),
+  _queue: QueueEntry[] = []
 ): EngineOutput {
-  const period = periodOfNow(now);
+  const nextAssigned: Assigned = Object.fromEntries(POSITIONS.map(p => [p.id, null as string | null]));
 
-  // 1) Move everyone one step along the ring
-  const next: Assigned = Object.fromEntries(POSITIONS.map((p) => [p.id, null]));
-  for (const p of POSITIONS) {
-    const gid = assigned[p.id];
+  for (let i = 0; i < RING.length; i++) {
+    const from = RING[i];
+    const gid = assigned[from];
     if (!gid) continue;
-    const to = NEXT_BY_FROM.get(p.id);
-    if (to) next[to] = gid;
-  }
-
-  // 2) Adults-only: keep ONLY REST_STATIONS staffed
-  if (period === "ADULTS_ONLY") {
-    for (const sid of Object.keys(next)) {
-      if (!REST_STATIONS.has(sid)) next[sid] = null;
-    }
+    const to = RING[(i + 1) % RING.length];
+    nextAssigned[to] = gid;
   }
 
   return {
-    nextAssigned: next,
-    nextBreaks: breaks, // unchanged in test mode
-    conflicts: [],      // skip age checks in test mode
-    meta: { period },
+    nextAssigned,
+    nextBreaks: breaks,
+    conflicts: [],
+    meta: { period: "ALL_AGES", breakQueue: _queue },
   };
 }
 
-export function computeNext(opts: {
+export function computeNext({
+  assigned,
+  guards,
+  breaks,
+  queue = [],
+  nowISO,
+}: {
   assigned: Assigned;
   guards: Guard[];
   breaks: BreakState;
+  queue?: QueueEntry[];
   nowISO: string;
 }) {
-  return rotateOnceEngine(opts.assigned, opts.guards, opts.breaks, new Date(opts.nowISO));
+  return rotateOnceEngine(assigned, guards, breaks, new Date(nowISO), queue);
 }

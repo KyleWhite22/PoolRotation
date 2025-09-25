@@ -106,7 +106,7 @@ export default function PoolMap({
                   : isConflict
                     ? "#ef4444" // conflict red
                     : has
-                      ? "#22c55e" // green if assigned
+                      ? "#64748b" // green if assigned
                       : "#64748b" // gray if empty
               }
               strokeWidth={REST_STATIONS.has(p.id) ? 1.5 : 0.7} // make rest chair border thicker

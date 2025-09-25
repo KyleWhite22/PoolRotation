@@ -3,14 +3,17 @@ import PoolMap from "../components/PoolMap";
 import GuardPickerModal from "../components/GuardPickerModal";
 import CreateGuardModal from "../components/CreateGuardModal";
 import type { Guard } from "../components/GuardPickerModal";
-import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_STATIONS }
-  from "../../../shared/data/poolLayout.js";
-// -------- Helpers --------
-const todayISO = () => new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+import { POSITIONS } from "../../../shared/data/poolLayout.js";
 
+// -------- Types --------
 type Assigned = Record<string, string | null>;
 type BreakState = Record<string, string>; // guardId -> breakUntilISO
 type ConflictUI = { stationId: string; guardId: string; reason: string };
+type QueueEntry = { guardId: string; returnTo: string };
+
+// Local YYYY-MM-DD based on your simulated clock (NY time to match ops)
+const ymdLocal = (d: Date) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // en-CA => YYYY-MM-DD
 
 export default function Home() {
   // --- Server data ---
@@ -23,27 +26,33 @@ export default function Home() {
   );
   const [breaks, setBreaks] = useState<BreakState>({});
   const [conflicts, setConflicts] = useState<ConflictUI[]>([]);
+  const [breakQueue, setBreakQueue] = useState<QueueEntry[]>([]);
 
   // --- UI state ---
-  const [pickerFor, setPickerFor] = useState<string | null>(null);
+  const [pickerFor, setPickerFor] = useState<string | null>(null); // seat assignment
+  const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
   const [createOpen, setCreateOpen] = useState(false);
   const rotatingRef = useRef(false);
 
+  // start at 12:00 PM today (local)
+  const [simulatedNow, setSimulatedNow] = useState(() => {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    return d;
+  });
+
+  // All API traffic must use this key (prevents UTC day drift)
+  const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
   // --- Derived ---
   const usedGuardIds = useMemo(
     () => Object.values(assigned).filter((v): v is string => Boolean(v)),
     [assigned]
   );
-
-  // -------- Effects --------
-  useEffect(() => {
-    (async () => {
-      await fetchGuards();
-      await fetchAssignments();
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const alreadyQueuedIds = useMemo(
+    () => new Set(breakQueue.map((q) => q.guardId)),
+    [breakQueue]
+  );
 
   // -------- Data funcs --------
   const normalizeGuards = (items: any[]): Guard[] =>
@@ -70,17 +79,9 @@ export default function Home() {
       setLoading(false);
     }
   };
-const handleRefresh = async () => {
-  await fetchGuards();
-  await fetchAssignments();
 
-  // reset simulated clock back to noon
-  const reset = new Date();
-  reset.setHours(12, 0, 0, 0);
-  setSimulatedNow(reset);
-};
   const fetchAssignments = async () => {
-    const res = await fetch(`/api/rotations/day/${todayISO()}`, {
+    const res = await fetch(`/api/rotations/day/${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
@@ -104,10 +105,27 @@ const handleRefresh = async () => {
     });
   };
 
+  const fetchQueue = async () => {
+    const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
+      headers: { "x-api-key": "dev-key-123" },
+    });
+    const data = await res.json();
+    setBreakQueue(Array.isArray(data?.queue) ? data.queue : []);
+  };
+
+  // -------- Effects --------
+  useEffect(() => {
+    (async () => {
+      await fetchGuards();
+      await fetchAssignments();
+      await fetchQueue(); // ensure UI has current queue on load
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey]); // re-pull if you change simulated date
+
   // -------- Handlers --------
   const assignGuard = async (positionId: string, guardId: string) => {
     if (usedGuardIds.includes(guardId)) return;
-
     // Optimistic UI
     setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
 
@@ -116,7 +134,7 @@ const handleRefresh = async () => {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
-          date: todayISO(),
+          date: dayKey,
           time: new Date().toISOString().slice(11, 16),
           stationId: positionId,
           guardId,
@@ -135,7 +153,7 @@ const handleRefresh = async () => {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
-          date: todayISO(),
+          date: dayKey,
           time: new Date().toISOString().slice(11, 16),
           stationId: positionId,
           guardId: null,
@@ -147,63 +165,144 @@ const handleRefresh = async () => {
     }
   };
 
- // start at 12:00 PM today
-const [simulatedNow, setSimulatedNow] = useState(() => {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0); // force to noon
-  return d;
-});
+  const addToQueue = async (guardId: string, returnTo: string) => {
+    try {
+      await fetch("/api/plan/queue-add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({ date: dayKey, guardId, returnTo }),
+      });
+      await fetchQueue();
+    } catch (e) {
+      console.error("Failed to add to queue:", e);
+    }
+  };
 
-// -------- Handlers --------
-const plus15Minutes = async () => {
+ const plus15Minutes = async () => {
   if (rotatingRef.current) return;
   rotatingRef.current = true;
   try {
-    // advance simulated clock +15m
     const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
     setSimulatedNow(newNow);
 
-    // ask server to compute & persist next rotation at that simulated time
     const res = await fetch("/api/plan/rotate", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({
-        date: todayISO(),
+        date: dayKey,                 // or todayISO() if you prefer
         nowISO: newNow.toISOString(),
-        assignedSnapshot: assigned, // 👈 send current client snapshot for fallback
+        assignedSnapshot: assigned,   // <- REQUIRED
       }),
     });
-    const data = await res.json();
 
+    const data = await res.json();
     if (data?.assigned) setAssigned(data.assigned);
     if (data?.breaks) setBreaks(data.breaks);
     if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+     await fetchQueue();
   } catch (e) {
     console.error("Rotate failed:", e);
-    fetchAssignments();
   } finally {
     rotatingRef.current = false;
   }
 };
 
+  const handleRefreshAll = async () => {
+    // reset clock back to noon
+    const reset = new Date(simulatedNow);
+    reset.setHours(12, 0, 0, 0);
+    setSimulatedNow(reset);
+
+    // clear UI state
+    setBreakQueue([]);
+    setAssigned(Object.fromEntries(POSITIONS.map((p) => [p.id, null])));
+    setBreaks({});
+
+    // clear local cache for THIS simulated day
+    try {
+      localStorage.removeItem(`breaks:${dayKey}`);
+    } catch {}
+
+    // clear backend snapshots + breaks + queues (best-effort)
+    try {
+      const time = new Date().toISOString().slice(11, 16);
+      await Promise.all(
+        POSITIONS.map((p) =>
+          fetch("/api/rotations/slot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+            body: JSON.stringify({
+              date: dayKey,
+              time,
+              stationId: p.id,
+              guardId: null,
+              notes: "refresh-all",
+            }),
+          })
+        )
+      );
+      await fetch("/api/plan/queue-clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({ date: dayKey }),
+      });
+    } catch (e) {
+      console.warn("Backend reset failed (continuing):", e);
+    }
+  };
+
+  const autopopulate = async () => {
+    try {
+      const res = await fetch("/api/plan/autopopulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({ date: dayKey }),
+      });
+      const data = await res.json();
+      if (data?.assigned) setAssigned(data.assigned);
+      if (Array.isArray(data?.meta?.breakQueue)) setBreakQueue(data.meta.breakQueue);
+      if (data?.breaks) setBreaks(data.breaks);
+      if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+    } catch (e) {
+      console.error("Autopopulate failed:", e);
+    }
+  };
+
   // -------- UI helpers --------
   const anyAssigned = Object.values(assigned).some(Boolean);
+
+  // simple numbered queue display (always show all sections found in POSITIONS)
+  const sections = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
+    (a, b) => Number(a) - Number(b)
+  );
+
+  const guardName = (gid: string) => guards.find((g) => g.id === gid)?.name ?? gid;
+  const queueBySection = (sec: string) =>
+    breakQueue.filter((q) => q.returnTo === sec).map((q) => guardName(q.guardId));
 
   return (
     <div className="min-h-screen bg-pool-800 text-white">
       <header className="h-16 flex items-center px-6 border-b border-pool-700 bg-pool-900">
         <h1 className="text-xl font-semibold">Lifeguard Rotation Manager</h1>
+        <span className="ml-4 text-xs rounded px-2 py-1 border border-pool-600">
+          Simulated: {dayKey}{" "}
+          {simulatedNow.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
         <div className="ml-auto flex gap-2">
-           <span className="ml-4 text-xs rounded px-2 py-1 border border-pool-600">
-    Simulated Time: {simulatedNow.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-  </span>
           <button
             type="button"
             onClick={plus15Minutes}
-            disabled={!anyAssigned || rotatingRef.current}
+            disabled={rotatingRef.current || (!anyAssigned && breakQueue.length === 0)}
             className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50 transition"
           >
             +15 Minutes
+          </button>
+          <button
+            type="button"
+            onClick={autopopulate}
+            className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 transition"
+          >
+            Autopopulate
           </button>
           <button
             type="button"
@@ -214,10 +313,10 @@ const plus15Minutes = async () => {
           </button>
           <button
             type="button"
-            onClick={handleRefresh}
+            onClick={handleRefreshAll}
             className="px-4 py-2 rounded-xl2 bg-pool-600 hover:bg-pool-500 transition"
           >
-            Refresh Time
+            Refresh All
           </button>
         </div>
       </header>
@@ -234,9 +333,72 @@ const plus15Minutes = async () => {
             conflicts={conflicts}
           />
         </section>
+
+        {/* Break queue: numbered by section, always visible */}
+        <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-md font-semibold text-slate-100">Break queue</h3>
+            <button
+              type="button"
+              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-sm"
+              onClick={async () => {
+                try {
+                  await fetch("/api/plan/queue-clear", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                    body: JSON.stringify({ date: dayKey }),
+                  });
+                  setBreakQueue([]);
+                } catch (e) {
+                  console.error("Failed to clear queues:", e);
+                }
+              }}
+            >
+              Clear queues
+            </button>
+          </div>
+
+          <ul className="space-y-2">
+            {sections.map((sec) => {
+              const names = queueBySection(sec);
+              return (
+                <li key={sec} className="flex items-center gap-3">
+                  <span className="w-6 text-right font-mono text-slate-300">{sec}.</span>
+                  {names.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {names.map((n, i) => (
+                        <span
+                          key={`${sec}-${i}-${n}`}
+                          className="px-2 py-0.5 rounded bg-slate-800 text-slate-100 text-sm"
+                        >
+                          {n}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-slate-500 text-sm">—</span>
+                  )}
+                  <button
+                    type="button"
+                    className="ml-auto px-2 py-1 rounded bg-pool-500 hover:bg-pool-400 text-sm"
+                    onClick={() => setQueuePickerFor(sec)}
+                  >
+                    + Add to {sec} queue
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
       </main>
 
-      <CreateGuardModal open={createOpen} onClose={() => setCreateOpen(false)} onCreated={fetchGuards} />
+      <CreateGuardModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={fetchGuards}
+      />
+
+      {/* Assign directly to a seat */}
       <GuardPickerModal
         open={pickerFor !== null}
         onClose={() => setPickerFor(null)}
@@ -248,6 +410,23 @@ const plus15Minutes = async () => {
           void assignGuard(pickerFor, guardId);
         }}
         title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
+      />
+
+      {/* Assign directly to a section queue */}
+      <GuardPickerModal
+        open={queuePickerFor !== null}
+        onClose={() => setQueuePickerFor(null)}
+        guards={guards.filter(
+          (g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id)
+        )}
+        alreadyAssignedIds={[]}
+        onSelect={async (guardId: string) => {
+          if (!queuePickerFor) return;
+          const sec = queuePickerFor;
+          setQueuePickerFor(null);
+          await addToQueue(guardId, sec);
+        }}
+        title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
       />
     </div>
   );

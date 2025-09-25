@@ -1,4 +1,3 @@
-// All units are relative to the viewBox (0..100)
 export type Position = {
   id: string;
   label: string;
@@ -7,8 +6,8 @@ export type Position = {
 };
 
 export type Edge = {
-  from: string; // position id
-  to: string;   // position id
+  from: string; 
+  to: string;   
 };
 
 export const POSITIONS: Position[] = [
@@ -33,15 +32,13 @@ export const EDGES: Edge[] = [
    { from: "3.1",  to: "3.2" },
   { from: "3.2",  to: "3.3" },
    { from: "4.1",  to: "4.2" },
+   
 
 ];
 
 export const VIEWBOX = { x: 0, y: 20, width: 200, height: 200 };
 
-// A very simple “pool outline” placeholder path (rounded rectangle-like).
-// Swap this with your actual outline later (export an SVG path from Figma/Illustrator).
 export const POOL_PATH_D =
   "m 27.139815,77.126139 107.639265,0.306665 4.7533,-9.9666 -0.15333,-19.779864 23.45983,0.153332 0.15334,19.626532 5.36663,12.113252 0.61332,62.559574 -90.466041,0.15333 -0.153332,34.95976 -52.286309,0.30667 z";
 
-  // Adults-only rest chairs (used by engine when not in test mode)
 export const REST_STATIONS = new Set<string>(["1.2", "2.2", "3.1"]);
