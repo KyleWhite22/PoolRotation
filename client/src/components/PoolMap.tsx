@@ -1,6 +1,11 @@
 import { useMemo } from "react";
-import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_BY_SECTION }
-  from "../../../shared/data/poolLayout.js";
+import {
+  POSITIONS,
+  EDGES,
+  VIEWBOX,
+  POOL_SHAPES,          // ⬅️ use shapes array instead of POOL_PATH_D
+  REST_BY_SECTION,
+} from "../../../shared/data/poolLayout.js";
 
 export type Assigned = Record<string, string | null>;
 type Guard = { id: string; name: string; dob: string };
@@ -35,7 +40,6 @@ export default function PoolMap({
     return m;
   }, [guards]);
 
-  // per-seat rest highlight based on REST_BY_SECTION (rest chair may be any seat, or none)
   const isRestSeat = (seatId: string) => {
     const section = seatId.split(".")[0];
     return REST_BY_SECTION?.[section] === seatId;
@@ -44,11 +48,12 @@ export default function PoolMap({
   return (
     <svg
       viewBox={`${VIEWBOX.x} ${VIEWBOX.y} ${VIEWBOX.width} ${VIEWBOX.height}`}
-      className={className ?? "w-full h-[420px]"}
+      // Let it grow: fill width, take ~88% of viewport height (fallback to your prop)
+      className={className ?? "w-full h-[88vh]"} 
       role="img"
       aria-label="Pool map"
+      preserveAspectRatio="xMidYMid meet"
     >
-      {/* defs */}
       <defs>
         <marker id="arrowhead" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
           <path d="M0,0 L5,2.5 L0,5 Z" fill="#60a5fa" />
@@ -59,16 +64,45 @@ export default function PoolMap({
         </linearGradient>
       </defs>
 
-      {/* outline */}
-      <path d={POOL_PATH_D} transform="translate(-20,-30) scale(1.3)" fill="url(#poolFill)" stroke="#3b82f6" strokeWidth={0.8} />
+      {/* Draw ALL shapes from POOL_SHAPES */}
+      {POOL_SHAPES.map((s, i) =>
+        s.type === "path" ? (
+          <path
+            key={`shape-${i}`}
+            d={s.d}
+            fill={i === 0 ? "#bae6fd" : "none"}   // fill the main pool outline (adjust index if needed)
+            stroke="#7ba7edff"
+            strokeWidth={0.8}
+            opacity={i === 0 ? 1 : 0.9}
+            vectorEffect="non-scaling-stroke"
+          />
+        ) : (
+          <rect
+            key={`shape-${i}`}
+            x={s.x}
+            y={s.y}
+            width={s.width}
+            height={s.height}
+            fill="none"
+            stroke="#7ba7edff"
+            strokeWidth={0.8}
+            opacity={0.9}
+            vectorEffect="non-scaling-stroke"
+          />
+        )
+      )}
 
-      {/* edges */}
+      {/* Edges */}
       {EDGES.map((e) => {
         const a = POSITIONS.find((p) => p.id === e.from)!;
         const b = POSITIONS.find((p) => p.id === e.to)!;
         const boxW = 30, boxH = 22;
         const pad = Math.hypot(boxW, boxH) / 2 - 5;
-        const { x2, y2 } = endWithPadding(a.x, a.y, b.x, b.y, pad);
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len, uy = dy / len;
+        const x2 = b.x - ux * pad, y2 = b.y - uy * pad;
+
         return (
           <line
             key={`${e.from}-${e.to}`}
@@ -82,22 +116,23 @@ export default function PoolMap({
             opacity={0.9}
             markerEnd="url(#arrowhead)"
             pointerEvents="none"
+            vectorEffect="non-scaling-stroke"
           />
         );
       })}
 
-      {/* nodes */}
+      {/* Seats / guards */}
       {POSITIONS.map((p) => {
         const selectedGuardId = assigned[p.id] ?? null;
         const has = Boolean(selectedGuardId);
         const boxW = 20, boxH = 16;
 
         const fullName = has ? (guardNameById.get(selectedGuardId!) ?? "") : "";
-        const [first, ...nameRest] = fullName.split(" "); // renamed to avoid 'rest' clash
+        const [first, ...nameRest] = fullName.split(" ");
         const last = nameRest.join(" ");
 
         const isConflict = conflicts.some((c) => c.stationId === p.id);
-        const isRest = isRestSeat(p.id); // renamed boolean
+        const isRest = isRestSeat(p.id);
 
         return (
           <g key={p.id} transform={`translate(${p.x - boxW / 2} ${p.y - boxH / 2})`}>
@@ -107,17 +142,11 @@ export default function PoolMap({
               rx={1.6}
               className="cursor-pointer"
               fill={has ? "#1e293b" : "rgba(2,6,23,0.5)"}
-              stroke={
-                isRest
-                  ? "#dc2626" // 🔴 rest chair
-                  : isConflict
-                    ? "#ef4444" // conflict
-                    : "#64748b" // normal border
-              }
+              stroke={isRest ? "#dc2626" : isConflict ? "#ef4444" : "#64748b"}
               strokeWidth={isRest ? 1.5 : 0.7}
               onClick={() => onPick(p.id)}
+              vectorEffect="non-scaling-stroke"
             />
-
             <text x={boxW / 2} y={3.5} textAnchor="middle" fontSize="3" fill="#9cc2ff">
               {p.label}
             </text>
@@ -134,39 +163,9 @@ export default function PoolMap({
                 )}
               </>
             ) : (
-              <text x={boxW / 2} y={11} textAnchor="middle" fontSize="6" fill="#e2e8f0" className="pointer-events-none">
+              <text x={boxW / 2} y={11} textAnchor="middle" fontSize="6" fill="#e2e8f0">
                 X
               </text>
-            )}
-
-            {has && (
-              <g transform={`translate(${boxW - 4.5} ${-2})`}>
-                <rect
-                  width={6}
-                  height={4}
-                  rx={0.9}
-                  fill="#991b1b"
-                  className="cursor-pointer"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClear(p.id);
-                  }}
-                />
-                <text
-                  x={3}
-                  y={2.8}
-                  textAnchor="middle"
-                  fontSize="2.4"
-                  fill="#fff"
-                  className="cursor-pointer select-none"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClear(p.id);
-                  }}
-                >
-                  ✕
-                </text>
-              </g>
             )}
           </g>
         );

@@ -359,24 +359,14 @@ export default function Home() {
 
   // -------- Render --------
   return (
-    <AppShell title="Lifeguard Rotation Manager">
-      <ToolbarActions
-        onPlus15={plus15Minutes}
-        onAuto={autopopulate}
-        onNewGuard={() => setCreateOpen(true)}
-        onRefresh={handleRefreshAll}
-        disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
-        stamp={`Simulated: ${dayKey} ${simulatedNow.toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}`}
-      />
-
-      {/* Pool map */}
-      <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4 mb-6">
-        <h2 className="text-lg font-semibold text-slate-100">Main Pool</h2>
+  <AppShell title="Lifeguard Rotation Manager">
+    {/* Responsive layout: map + sidebar (right on lg, stacked on small) */}
+    <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
+      {/* LEFT: Pool map */}
+      <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
+        <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
         <PoolMap
-          className="w-full h-[700px]"
+          className="w-full h-[70vh] lg:h-[82vh]" // tall on desktop
           guards={guards}
           assigned={assigned}
           onPick={(positionId) => setPickerFor(positionId)}
@@ -385,65 +375,81 @@ export default function Home() {
         />
       </section>
 
-      {/* Break queue */}
-      <BreakQueue
-        queuesBySection={queuesBySection}
-        flatQueue={breakQueue}
-        seatedSet={seatedSet}
-        guards={guards}
-        onClearAll={async () => {
-          try {
-            await fetch("/api/plan/queue-clear", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-              body: JSON.stringify({ date: dayKey }),
-            });
-            setBreakQueue([]);
-            setQueuesBySection({});
-          } catch (e) {
-            console.error("Failed to clear queues:", e);
-          }
-        }}
-        onAddToSection={(sec) => setQueuePickerFor(sec)}
-      />
+      {/* RIGHT: Sidebar — toolbar + queue (sticky on desktop) */}
+      <aside className="space-y-6 lg:sticky lg:top-4 self-start">
+        <ToolbarActions
+          onPlus15={plus15Minutes}
+          onAuto={autopopulate}
+          onNewGuard={() => setCreateOpen(true)}
+          onRefresh={handleRefreshAll}
+          disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
+          stamp={`Simulated: ${dayKey} ${simulatedNow.toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}`}
+        />
 
-      {/* Modals */}
-      <CreateGuardModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        onCreated={fetchGuards}
-      />
+        <BreakQueue
+          queuesBySection={queuesBySection}
+          flatQueue={breakQueue}
+          seatedSet={seatedSet}
+          guards={guards}
+          onClearAll={async () => {
+            try {
+              await fetch("/api/plan/queue-clear", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                body: JSON.stringify({ date: dayKey }),
+              });
+              setBreakQueue([]);
+              setQueuesBySection({});
+            } catch (e) {
+              console.error("Failed to clear queues:", e);
+            }
+          }}
+          onAddToSection={(sec) => setQueuePickerFor(sec)}
+        />
+      </aside>
+    </div>
 
-      {/* Assign directly to a seat */}
-      <GuardPickerModal
-        open={pickerFor !== null}
-        onClose={() => setPickerFor(null)}
-        guards={guards}
-        alreadyAssignedIds={usedGuardIds}
-        onSelect={(guardId: string) => {
-          if (!pickerFor) return;
-          setPickerFor(null);
-          void assignGuard(pickerFor, guardId);
-        }}
-        title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
-      />
+    {/* Modals */}
+    <CreateGuardModal
+      open={createOpen}
+      onClose={() => setCreateOpen(false)}
+      onCreated={fetchGuards}
+    />
 
-      {/* Add directly to a section queue */}
-      <GuardPickerModal
-        open={queuePickerFor !== null}
-        onClose={() => setQueuePickerFor(null)}
-        guards={guards.filter(
-          (g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id)
-        )}
-        alreadyAssignedIds={[]}
-        onSelect={async (guardId: string) => {
-          if (!queuePickerFor) return;
-          const sec = queuePickerFor;
-          setQueuePickerFor(null);
-          await addToQueue(guardId, sec);
-        }}
-        title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
-      />
-    </AppShell>
-  );
+    {/* Assign directly to a seat */}
+    <GuardPickerModal
+      open={pickerFor !== null}
+      onClose={() => setPickerFor(null)}
+      guards={guards}
+      alreadyAssignedIds={usedGuardIds}
+      onSelect={(guardId: string) => {
+        if (!pickerFor) return;
+        setPickerFor(null);
+        void assignGuard(pickerFor, guardId);
+      }}
+      title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
+    />
+
+    {/* Add directly to a section queue */}
+    <GuardPickerModal
+      open={queuePickerFor !== null}
+      onClose={() => setQueuePickerFor(null)}
+      guards={guards.filter(
+        (g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id)
+      )}
+      alreadyAssignedIds={[]}
+      onSelect={async (guardId: string) => {
+        if (!queuePickerFor) return;
+        const sec = queuePickerFor;
+        setQueuePickerFor(null);
+        await addToQueue(guardId, sec);
+      }}
+      title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
+    />
+  </AppShell>
+);
+
 }
