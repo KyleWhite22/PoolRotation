@@ -35,7 +35,7 @@ export default function AppShell({
       <main className="flex-1 p-6">{children}</main>
 
       {footer && (
-        <footer className="border-t border-pool-700 bg-pool-900/60">
+        <footer>
           <div className="max-w-6xl mx-auto p-4 text-center text-sm text-gray-300">
             {footer}
           </div>

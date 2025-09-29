@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useMemo, useRef, useState, useEffect, useLayoutEffect } from "react";
 import AppShell from "../components/AppShell";
 import PoolMap from "../components/PoolMap";
 import ToolbarActions from "../components/actions/ToolbarActions";
@@ -14,9 +14,8 @@ type BreakState = Record<string, string>;
 type ConflictUI = { stationId: string; guardId: string; reason: string };
 type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
 
-// Local YYYY-MM-DD based on your simulated clock (NY time)
 const ymdLocal = (d: Date) =>
-  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d);
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // YYYY-MM-DD
 
 export default function Home() {
   // --- Server data ---
@@ -78,7 +77,11 @@ export default function Home() {
 
   const anyAssigned = useMemo(() => Object.values(assigned).some(Boolean), [assigned]);
 
-  // -------- Data funcs --------
+  // ---------- Persistence race-guards ----------
+  const assignedHydratedRef = useRef(false); // set true after we read LS on mount/day change
+  const allowPersistRef = useRef(false);     // set true *one microtask later* to avoid clobber
+
+  // ---------- Data funcs ----------
   const normalizeGuards = (items: any[]): Guard[] =>
     items
       .map((it) => {
@@ -111,6 +114,7 @@ export default function Home() {
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
       await res.json();
 
+    // Keep latest row per station
     const latestByStation = new Map<string, (typeof items)[number]>();
     for (const it of items) {
       const prev = latestByStation.get(it.stationId);
@@ -119,11 +123,12 @@ export default function Home() {
       }
     }
 
+    // **Merge non-null only** so we never clear a locally assigned seat with nulls from server.
     setAssigned((prev) => {
       const next = { ...prev };
       for (const p of POSITIONS) {
         const rec = latestByStation.get(p.id);
-        if (rec) next[p.id] = rec.guardId ?? null;
+        if (rec?.guardId) next[p.id] = rec.guardId;
       }
       return next;
     });
@@ -131,6 +136,7 @@ export default function Home() {
 
   const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
     const keepBuckets = !!opts?.keepBuckets;
+
     const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
@@ -154,15 +160,45 @@ export default function Home() {
     }
   };
 
-  // -------- Effects --------
-  useEffect(() => {
-    (async () => {
-      await fetchGuards();
-      await fetchAssignments();
-      await fetchQueue(); // ensure UI has current queue on load
-    })();
+  // ---------- Hydrate assigned (pre-paint) & then fetch data ----------
+  useLayoutEffect(() => {
+    assignedHydratedRef.current = false;
+    allowPersistRef.current = false;
+
+    // 1) Hydrate from localStorage synchronously
+    const raw = localStorage.getItem(`assigned:${dayKey}`);
+    if (raw) {
+      try {
+        const loc = JSON.parse(raw) as Assigned;
+        const normalized: Assigned = Object.fromEntries(
+          POSITIONS.map((p) => [p.id, (loc && p.id in loc ? loc[p.id] : null)])
+        );
+        setAssigned(normalized);
+      } catch {
+        // ignore parse error; keep current assigned
+      }
+    }
+
+    // 2) Mark hydration done, allow persist on next microtask (after React applies setState)
+    assignedHydratedRef.current = true;
+    queueMicrotask(() => {
+      allowPersistRef.current = true;
+    });
+
+    // 3) Fetch server data (merge-only for assigned)
+    void fetchGuards();
+    void fetchAssignments();
+    void fetchQueue();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey]);
+
+  // Persist assigned to localStorage AFTER hydration has applied
+  useEffect(() => {
+    if (!assignedHydratedRef.current || !allowPersistRef.current) return;
+    try {
+      localStorage.setItem(`assigned:${dayKey}`, JSON.stringify(assigned));
+    } catch {}
+  }, [assigned, dayKey]);
 
   // -------- Handlers --------
   const assignGuard = async (positionId: string, guardId: string) => {
@@ -246,7 +282,6 @@ export default function Home() {
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
       if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
-
       // refresh flat list but DO NOT overwrite buckets we just set
       await fetchQueue({ keepBuckets: true });
       // keep flat list in sync (fallback + persistence)
@@ -273,6 +308,7 @@ export default function Home() {
     // clear local cache for THIS simulated day
     try {
       localStorage.removeItem(`breaks:${dayKey}`);
+      localStorage.removeItem(`assigned:${dayKey}`); // also clear seats cache on explicit refresh
     } catch {}
 
     // clear backend snapshots + breaks + queues (best-effort)
