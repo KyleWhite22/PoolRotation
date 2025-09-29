@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_STATIONS }
+import { POSITIONS, EDGES, VIEWBOX, POOL_PATH_D, REST_BY_SECTION }
   from "../../../shared/data/poolLayout.js";
+
 export type Assigned = Record<string, string | null>;
 type Guard = { id: string; name: string; dob: string };
 
@@ -26,13 +27,19 @@ export default function PoolMap({
   onPick,
   onClear,
   className,
-  conflicts = [], // <-- default so it's always defined
+  conflicts = [],
 }: Props) {
   const guardNameById = useMemo(() => {
     const m = new Map<string, string>();
     guards.forEach((g) => m.set(g.id, g.name));
     return m;
   }, [guards]);
+
+  // per-seat rest highlight based on REST_BY_SECTION (rest chair may be any seat, or none)
+  const isRestSeat = (seatId: string) => {
+    const section = seatId.split(".")[0];
+    return REST_BY_SECTION?.[section] === seatId;
+  };
 
   return (
     <svg
@@ -86,11 +93,11 @@ export default function PoolMap({
         const boxW = 20, boxH = 16;
 
         const fullName = has ? (guardNameById.get(selectedGuardId!) ?? "") : "";
-        const [first, ...rest] = fullName.split(" ");
-        const last = rest.join(" ");
+        const [first, ...nameRest] = fullName.split(" "); // renamed to avoid 'rest' clash
+        const last = nameRest.join(" ");
 
-        // <-- compute per-node
         const isConflict = conflicts.some((c) => c.stationId === p.id);
+        const isRest = isRestSeat(p.id); // renamed boolean
 
         return (
           <g key={p.id} transform={`translate(${p.x - boxW / 2} ${p.y - boxH / 2})`}>
@@ -101,15 +108,13 @@ export default function PoolMap({
               className="cursor-pointer"
               fill={has ? "#1e293b" : "rgba(2,6,23,0.5)"}
               stroke={
-                REST_STATIONS.has(p.id)
-                  ? "#dc2626" // 🔴 red outline for rest chairs
+                isRest
+                  ? "#dc2626" // 🔴 rest chair
                   : isConflict
-                    ? "#ef4444" // conflict red
-                    : has
-                      ? "#64748b" // green if assigned
-                      : "#64748b" // gray if empty
+                    ? "#ef4444" // conflict
+                    : "#64748b" // normal border
               }
-              strokeWidth={REST_STATIONS.has(p.id) ? 1.5 : 0.7} // make rest chair border thicker
+              strokeWidth={isRest ? 1.5 : 0.7}
               onClick={() => onPick(p.id)}
             />
 

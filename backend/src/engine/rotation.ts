@@ -1,11 +1,12 @@
+// backend/src/engine/rotation.ts
 console.log("[engine/rotation] LOADED");
-import { POSITIONS, REST_STATIONS } from "../../../shared/data/poolLayout.js";
+import { POSITIONS, REST_BY_SECTION } from "../../../shared/data/poolLayout.js";
 
 export type Guard = { id: string; name: string; dob: string };
 export type Assigned = Record<string, string | null>;
 export type BreakState = Record<string, string>;
 
-// ✅ Queue entries now carry enteredTick (integer tick index)
+// Queue entries carry enteredTick (integer "15-min tick" index)
 export type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
 
 export type Conflict = { stationId: string; reason: "AGE_RULE"; guardId: string };
@@ -40,12 +41,23 @@ const seatsBySection: Record<string, string[]> = (() => {
   return m;
 })();
 
+const restChairBySection: Record<string, string | null> = (() => {
+  const m: Record<string, string | null> = {};
+  for (const s of SECTIONS) {
+    const v = (REST_BY_SECTION as any)?.[s];
+    m[s] = typeof v === "string" ? v : null;
+  }
+  return m;
+})();
+
 const firstSeatBySection: Record<string, string> = Object.fromEntries(
   SECTIONS.map((s) => [s, seatsBySection[s][0]])
 );
+
 const lastSeatSet = new Set<string>(
   SECTIONS.map((s) => seatsBySection[s][seatsBySection[s].length - 1])
 );
+
 const sectionBySeat: Record<string, string> = (() => {
   const m: Record<string, string> = {};
   for (const s of SECTIONS) for (const seat of seatsBySection[s]) m[seat] = s;
@@ -58,22 +70,82 @@ function nextSectionId(sec: string): string {
 }
 
 function tickIndexFromISO(nowISO: string): number {
-  // Coarse monotonic tick: 1 tick per 15 minutes since epoch.
+  // 1 tick per 15 minutes since epoch
   const ms = Date.parse(nowISO);
   return Math.floor(ms / (15 * 60 * 1000));
 }
 function minuteOfHourUTC(nowISO: string): number {
   const d = new Date(nowISO);
-  return d.getUTCMinutes(); // since you're passing ISO strings, UTC is stable here
+  return d.getUTCMinutes();
 }
 function isAdultSwimFromISO(nowISO: string): boolean {
   return minuteOfHourUTC(nowISO) === 45;
 }
 
+// ---- helpers ---------------------------------------------------------------
+const isEligibleAt = (entry: QueueEntry, tick: number) => entry.enteredTick < tick;
+
+/**
+ * Adult-swim (:45) step:
+ * - Everyone leaves their seats.
+ *   - If a guard WAS on a section's last seat before :45, they move to the NEXT section's queue
+ *     with a 30-min break credit => ineligible for 2 ticks (enteredTick = currentTick + 2).
+ *   - All others go to their CURRENT section's queue, eligible immediately at :00 (enteredTick = currentTick).
+ * - For each section that has a rest chair, the guard who would have started at the first chair
+ *   (i.e., next usable from that section's queue) is seated on that rest chair for :45–:00.
+ */
+function tickAdultSwim(
+  assignedBefore: Assigned,
+  qBuckets: Record<string, QueueEntry[]>,
+  currentTick: number
+) {
+  // Clear seating for the :45 frame; we only show rest chairs during adult swim
+  const nextAssigned: Assigned = Object.fromEntries(
+    POSITIONS.map((p) => [p.id, null as string | null])
+  );
+
+  // 1) Move seated guards to queues according to end/non-end rules
+  for (const s of SECTIONS) {
+    const seats = seatsBySection[s];
+    const lastSeat = seats[seats.length - 1];
+
+    for (const seat of seats) {
+      const gid = assignedBefore[seat];
+      if (!gid) continue;
+
+      if (seat === lastSeat) {
+        // End-of-section before :45 -> next section queue, 30-min break (2 ticks wait)
+        const nxt = nextSectionId(s);
+        qBuckets[nxt].push({ guardId: gid, returnTo: nxt, enteredTick: currentTick + 2 });
+      } else {
+        // Not end -> current section queue, eligible at :00
+        qBuckets[s].push({ guardId: gid, returnTo: s, enteredTick: currentTick });
+      }
+    }
+  }
+
+  // 2) Seat rest guard (if any) per section by popping next usable for that section
+  const seatedAtRest = new Set<string>();
+  for (const s of SECTIONS) {
+    const restSeat = restChairBySection[s];
+    if (!restSeat) continue;
+
+    const bucket = qBuckets[s];
+    const idx = bucket.findIndex((e) => isEligibleAt(e, currentTick)); // must have enteredTick < currentTick
+    if (idx !== -1) {
+      const [entry] = bucket.splice(idx, 1);
+      nextAssigned[restSeat] = entry.guardId;
+      seatedAtRest.add(entry.guardId);
+    }
+  }
+
+  return { nextAssigned, seatedAtRest };
+}
+
 // ---- core stepper -----------------------------------------------------------
 export function computeNext({
   assigned,
-  guards,          // unused for now (kept for future rules)
+  guards, // unused for now (kept for future rules)
   breaks,
   queue = [],
   nowISO,
@@ -87,7 +159,7 @@ export function computeNext({
   const currentTick = tickIndexFromISO(nowISO);
   const adult = isAdultSwimFromISO(nowISO);
 
-  // Normalize queue buckets; fix missing/NaN enteredTick to "must wait 1 full tick"
+  // Normalize queue buckets; clamp bad/missing enteredTick to currentTick
   const qBuckets: Record<string, QueueEntry[]> = {};
   for (const s of SECTIONS) qBuckets[s] = [];
   for (const raw of queue) {
@@ -96,127 +168,73 @@ export function computeNext({
     const etRaw =
       typeof (raw as any)?.enteredTick === "number" && Number.isFinite((raw as any).enteredTick)
         ? (raw as any).enteredTick
-        : currentTick; // default: added this/last frame → must sit out one full tick
+        : currentTick;
 
-    // 🔧 Clamp future ticks to currentTick so eligibility can eventually happen
     const et = Math.min(etRaw, currentTick);
-
     if (!gid || !SECTIONS.includes(sec)) continue;
     qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: et });
   }
 
-  const nextAssigned: Assigned = Object.fromEntries(
-    POSITIONS.map((p) => [p.id, null as string | null])
-  );
-
-  // Easy access sets
-  const restSet = new Set<string>(REST_STATIONS ?? []);
-  const seatedThisTick = new Set<string>();
+  // ADULT SWIM FRAME ---------------------------------------------------------
   if (adult) {
-    // ===== ADULT SWIM TICK =====
-    // Step A) Normal shift first: tails enqueue to NEXT section, then shift within each section
-    for (const seat of Object.keys(assigned)) {
-      const gid = assigned[seat];
-      if (!gid) continue;
-      if (lastSeatSet.has(seat)) {
-        const curSec = sectionBySeat[seat];
-        const nxtSec = nextSectionId(curSec);
-        qBuckets[nxtSec].push({ guardId: gid, returnTo: nxtSec, enteredTick: currentTick });
-        // tail vacates
-      }
-    }
+    const { nextAssigned, seatedAtRest } = tickAdultSwim(assigned, qBuckets, currentTick);
 
-    const shifted: Assigned = Object.fromEntries(POSITIONS.map(p => [p.id, null as string | null]));
-    for (const s of SECTIONS) {
-      const seats = seatsBySection[s];
-      for (let i = seats.length - 1; i >= 1; i--) {
-        const from = seats[i - 1];
-        const to = seats[i];
-        const gid = assigned[from];
-        if (!gid) continue;
-        shifted[to] = gid;
-      }
-    }
-
-    // Step B) Apply adult-swim: keep rest seats staffed; everyone else queues.
-    // Special case: if the entry seat is a rest seat and empty after shift, pull from that section's queue (eligible only).
-    const seatedNowAdult = new Set<string>(); // guards we keep seated (rest only)
-
-    // 1) Per-section: ensure entry rest seat is filled (from shift or queue)
-    for (const s of SECTIONS) {
-      const entrySeat = seatsBySection[s][0];
-      const entryIsRest = REST_STATIONS.has(entrySeat);
-
-      if (entryIsRest) {
-        if (shifted[entrySeat]) {
-          // Someone rotated into entry rest seat; keep them seated
-          const gid = shifted[entrySeat]!;
-          nextAssigned[entrySeat] = gid;
-          seatedNowAdult.add(gid);
-        } else {
-          // Entry rest is empty: pull first eligible from this section's queue
-          const bucket = qBuckets[s];
-          const idx = bucket.findIndex(e => e.enteredTick < currentTick); // waited ≥ 1 tick
-          if (idx !== -1) {
-            const [head] = bucket.splice(idx, 1);
-            nextAssigned[entrySeat] = head.guardId;
-            seatedNowAdult.add(head.guardId);
-          }
-        }
-      }
-    }
-
-    // 2) For all other rest seats (non-entry) — keep whoever rotated into them
-    for (const seat of Object.keys(shifted)) {
-      if (!REST_STATIONS.has(seat)) continue;               // rest seats only
-      if (nextAssigned[seat]) continue;                     // already handled entry rest above
-      const gid = shifted[seat];
-      if (!gid) continue;
-      nextAssigned[seat] = gid;                             // stays put during adult swim
-      seatedNowAdult.add(gid);
-    }
-
-    // 3) Everyone else (non-rest seats in the shifted snapshot) → queue (to their own section)
-    //    enteredTick = currentTick (they start their adult-swim break now)
-    for (const seat of Object.keys(shifted)) {
-      if (REST_STATIONS.has(seat)) continue;                // rest handled already
-      const gid = shifted[seat];
-      if (!gid) continue;
-      const sec = sectionBySeat[seat];
-      qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: currentTick });
-    }
-
-    // 4) Build outgoing queue: keep order by section bucket; dedupe; drop any seated-at-rest
+    // Outgoing queue: flatten per-section buckets, excluding those we seated on rest
     const seen = new Set<string>();
     const queuedOutAdult: QueueEntry[] = [];
     for (const s of SECTIONS) {
       for (const q of qBuckets[s]) {
-        if (seatedNowAdult.has(q.guardId)) continue; // don't queue someone we seated at rest
-        if (seen.has(q.guardId)) continue;           // dedupe by guardId
+        if (seatedAtRest.has(q.guardId)) continue;
+        if (seen.has(q.guardId)) continue;
         seen.add(q.guardId);
         queuedOutAdult.push(q);
       }
     }
 
     return {
-  nextAssigned,
-  nextBreaks: breaks,
-  conflicts: [],
-  meta: {
-    period: "ADULT_SWIM",
-    breakQueue: queuedOutAdult,
-    queuesBySection: qBuckets, // expose final per-section queues
-  },
-};
+      nextAssigned,
+      nextBreaks: breaks,
+      conflicts: [],
+      meta: {
+        period: "ADULT_SWIM",
+        breakQueue: queuedOutAdult,
+        queuesBySection: qBuckets,
+      },
+    };
   }
 
+  // ALL-AGES FRAME -----------------------------------------------------------
+  const nextAssigned: Assigned = Object.fromEntries(
+    POSITIONS.map((p) => [p.id, null as string | null])
+  );
+  const seatedThisTick = new Set<string>();
 
+  // Was the PREVIOUS frame adult swim?
+  const prevWasAdult = (((currentTick - 1) % 4) + 4) % 4 === 3;
 
-  // ===== NORMAL TICK =====
-  // 1) End-of-section → enqueue into NEXT section (unchanged)
+  // Start from a working copy
+  const assignedStart: Assigned = Object.fromEntries(
+    POSITIONS.map((p) => [p.id, assigned[p.id] ?? null])
+  );
+
+  // Collect rest returners; we’ll seat them on first chair AFTER the shift
+  const restReturners: Record<string, string> = {};
+  if (prevWasAdult) {
+    for (const s of SECTIONS) {
+      const restSeat = restChairBySection[s];
+      if (!restSeat) continue;
+      const gid = assignedStart[restSeat];
+      if (gid) {
+        assignedStart[restSeat] = null; // remove from rest seat before shifting
+        restReturners[s] = gid;         // place on first chair after shift
+      }
+    }
+  }
+
+  // 1) End-of-section → enqueue into NEXT section
   const toEnqueue: Array<{ sec: string; gid: string }> = [];
-  for (const seat of Object.keys(assigned)) {
-    const gid = assigned[seat];
+  for (const seat of Object.keys(assignedStart)) {
+    const gid = assignedStart[seat];
     if (!gid) continue;
     if (lastSeatSet.has(seat)) {
       const curSec = sectionBySeat[seat];
@@ -228,271 +246,219 @@ export function computeNext({
     qBuckets[item.sec].push({
       guardId: item.gid,
       returnTo: item.sec,
-      enteredTick: currentTick, // ensures enteredTick < currentTick
+      enteredTick: currentTick,
     });
   }
-// ---- 1b) Queue balancing: ensure no section has zero eligible while another has surplus
-{
-  const isEligible = (e: QueueEntry) => e.enteredTick < currentTick; // waited ≥ 1 full tick
 
-  // repeat until no receiver lacks eligible or no donor has surplus
-  let moved = true;
-  while (moved) {
-    moved = false;
+  // ---- 1b) Queue balancing
+  {
+    const isElig = (e: QueueEntry) => isEligibleAt(e, currentTick);
 
-    // Count eligibles per section
-    const eligCount: Record<string, number> = {};
-    for (const s of SECTIONS) {
-      eligCount[s] = (qBuckets[s] ?? []).filter(isEligible).length;
-    }
+    let moved = true;
+    while (moved) {
+      moved = false;
 
-    // Receivers: sections with zero eligible and at least one seat to feed
-    const receivers = SECTIONS.filter((s) => eligCount[s] === 0);
+      const eligCount: Record<string, number> = {};
+      for (const s of SECTIONS) eligCount[s] = (qBuckets[s] ?? []).filter(isElig).length;
 
-    if (receivers.length === 0) break;
+      const receivers = SECTIONS.filter((s) => eligCount[s] === 0);
+      if (!receivers.length) break;
 
-    // Donors: sections with surplus (>1 eligible). Prefer the biggest surplus first.
-    const donors = SECTIONS
-      .map((s) => ({ s, count: eligCount[s] }))
-      .filter((x) => x.count > 1)
-      .sort((a, b) => b.count - a.count);
+      const donors = SECTIONS
+        .map((s) => ({ s, count: eligCount[s] }))
+        .filter((x) => x.count > 1)
+        .sort((a, b) => b.count - a.count);
 
-    if (donors.length === 0) break;
+      if (!donors.length) break;
 
-    for (const r of receivers) {
-      // pick current best donor
-      const donor = donors.find((d) => d.count > 1);
-      if (!donor) break;
+      for (const r of receivers) {
+        const donor = donors.find((d) => d.count > 1);
+        if (!donor) break;
 
-      const dsec = donor.s;
-      const dbucket = qBuckets[dsec];
+        const dbucket = qBuckets[donor.s];
+        const di = dbucket.findIndex(isElig);
+        if (di === -1) {
+          donor.count = 0;
+          continue;
+        }
 
-      // take the oldest eligible (FIFO) from donor
-      const di = dbucket.findIndex(isEligible);
-      if (di === -1) {
-        donor.count = 0; // nothing actually eligible in this donor; skip it
-        continue;
+        const [entry] = dbucket.splice(di, 1);
+        entry.returnTo = r;
+        (qBuckets[r] ?? (qBuckets[r] = [])).push(entry);
+        donor.count -= 1;
+        moved = true;
       }
-
-      const [entry] = dbucket.splice(di, 1);
-
-      // move to receiver; update returnTo so UI shows it in the new section
-      entry.returnTo = r;
-      (qBuckets[r] ?? (qBuckets[r] = [])).push(entry);
-
-      // adjust counts
-      donor.count -= 1;
-      eligCount[r] += 1;
-
-      // mark that we made progress; keep looping until stable
-      moved = true;
     }
   }
 
-  if (process.env.NODE_ENV !== "production") {
-    console.log("[rebalance.debug]", {
-      tick: currentTick,
-      buckets: Object.fromEntries(
-        SECTIONS.map((s) => [
-          s,
-          (qBuckets[s] ?? []).map((e) => `${e.guardId}(tick:${e.enteredTick})`),
-        ])
-      ),
-    });
-  }
-}
-
-  // 2) Advance within each section (unchanged)
+  // 2) Advance within each section (right shift)
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     for (let i = seats.length - 1; i >= 1; i--) {
       const from = seats[i - 1];
       const to = seats[i];
-      const gid = assigned[from];
+      const gid = assignedStart[from];
       if (!gid) continue;
       nextAssigned[to] = gid;
       seatedThisTick.add(gid);
     }
   }
 
-  // 3) Refill from queue
-  // If previous tick was adult swim (:45), refill ALL empty seats from that section’s queue;
-  // otherwise (ordinary tick), only fill the first seat.
-  const prevWasAdult = (((currentTick - 1) % 4) + 4) % 4 === 3;
+  // 2b) Seat rest returners directly onto first chair AFTER the shift
+  if (prevWasAdult) {
+    for (const s of SECTIONS) {
+      const gid = restReturners[s];
+      if (!gid) continue;
+      const entrySeat = firstSeatBySection[s];
+      nextAssigned[entrySeat] = gid; // ensure they truly start on the first chair
+      seatedThisTick.add(gid);
+    }
+  }
 
+  // 3) Refill from each section's queue
+  // If previous tick was adult swim, preserve order:
+  // - If no rest chair returner, fill entry seat from queue.
+  // - Then fill seats left→right starting at index 1.
+  // Otherwise (ordinary tick), fill only the entry seat.
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     const bucket = qBuckets[s];
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[refill.debug]", {
-        tick: currentTick,
-        prevWasAdult,
-        section: s,
-        seatsBefore: seats.map(seat => ({ seat, guard: nextAssigned[seat] ?? "—" })),
-        bucketBefore: bucket.map(q => `${q.guardId}(tick:${q.enteredTick})`),
-      });
-    }
+
     if (prevWasAdult) {
-      // After adult swim: fill ALL empty seats right -> left (not just the suffix)
-      for (let i = seats.length - 1; i >= 0; i--) {
-        const seat = seats[i];
-        if (nextAssigned[seat]) continue; // already occupied after the normal shift
+      // prevWasAdult: fill entry if no rest chair, then seats 1..
+      const entrySeat = seats[0];
 
-        // Pull the first eligible queue guard (FIFO) who waited at least one full tick
-        const idx = bucket.findIndex(
-          e => e.enteredTick < currentTick && !seatedThisTick.has(e.guardId)
+      // 3a) Ensure entry seat is filled when the section has no rest chair
+      if (!nextAssigned[entrySeat]) {
+        const idx0 = bucket.findIndex(
+          (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
         );
-        if (idx === -1) break; // no more eligible in this section
+        if (idx0 !== -1) {
+          const [entry] = bucket.splice(idx0, 1);
+          nextAssigned[entrySeat] = entry.guardId;
+          seatedThisTick.add(entry.guardId);
+        }
+      }
 
+      // 3b) Fill remaining seats left→right (indices 1..N-1) to preserve queue order
+      for (let i = 1; i < seats.length; i++) {
+        const seat = seats[i];
+        if (nextAssigned[seat]) continue; // already filled by shift
+        const idx = bucket.findIndex(
+          (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
+        );
+        if (idx === -1) break;
         const [entry] = bucket.splice(idx, 1);
         nextAssigned[seat] = entry.guardId;
         seatedThisTick.add(entry.guardId);
       }
     } else {
-      // Ordinary tick: only the entry seat pulls one (original logic)
-    const entrySeat = seats[0];
-if (!nextAssigned[entrySeat]) {
-  let idx = bucket.findIndex(e => e.enteredTick < currentTick && !seatedThisTick.has(e.guardId));
-if (idx === -1) {
-  idx = bucket.findIndex(e => e.enteredTick === currentTick && !seatedThisTick.has(e.guardId));
-}
-  if (idx !== -1) {
-    const [entry] = bucket.splice(idx, 1);
-    nextAssigned[entrySeat] = entry.guardId;
-    seatedThisTick.add(entry.guardId);
-  }
-}
-    }
-  }
- // ---- 3b) Global borrowing pass (runs every tick) --------------------------
-// If a section has empty seats but ZERO eligible in its own bucket,
-// borrow surplus eligible entries from other sections' buckets.
-
-type SeatRef = { section: string; seat: string; idx: number };
-const isEligible = (e: QueueEntry) =>
-  e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId);
-
-// Collect all still-empty seats (stable order: section, right -> left)
-const emptySeats: SeatRef[] = [];
-for (const s of SECTIONS) {
-  const seats = seatsBySection[s];
-  for (let i = seats.length - 1; i >= 0; i--) {
-    const seatId = seats[i];
-    if (!nextAssigned[seatId]) emptySeats.push({ section: s, seat: seatId, idx: i });
-  }
-}
-if (emptySeats.length) {
-  // Count eligibles per section
-  const eligCountBySection: Record<string, number> = {};
-  for (const s of SECTIONS) {
-    eligCountBySection[s] = (qBuckets[s] ?? []).filter(isEligible).length;
-  }
-
-  // Build donor list: only take the SURPLUS (eligible - 1) from sections with >1 eligible
-  type Donor = { section: string; entry: QueueEntry };
-  const donors: Donor[] = [];
-  for (const s of SECTIONS) {
-    const bucket = qBuckets[s];
-    if (!bucket?.length) continue;
-    const eligIdxs: number[] = [];
-    for (let i = 0; i < bucket.length; i++) if (isEligible(bucket[i])) eligIdxs.push(i);
-
-    const surplus = Math.max(0, eligIdxs.length - 1); // keep 1 eligible for its own entry seat
-    for (let k = 0; k < surplus; k++) {
-      donors.push({ section: s, entry: bucket[eligIdxs[k]] }); // FIFO order
+      // Ordinary tick: only the entry seat
+      const entrySeat = seats[0];
+      if (!nextAssigned[entrySeat]) {
+        // prefer truly eligible; if none, allow same-tick fallbacks to avoid gaps
+        let idx = bucket.findIndex(
+          (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
+        );
+        if (idx === -1) {
+          idx = bucket.findIndex(
+            (e) => e.enteredTick === currentTick && !seatedThisTick.has(e.guardId)
+          );
+        }
+        if (idx !== -1) {
+          const [entry] = bucket.splice(idx, 1);
+          nextAssigned[entrySeat] = entry.guardId;
+          seatedThisTick.add(entry.guardId);
+        }
+      }
     }
   }
 
-  // Assign donors to empties in order
-  for (const slot of emptySeats) {
-    if (!donors.length) break;
+  // 3b) Global borrowing pass
+  type SeatRef = { section: string; seat: string; idx: number };
+  const isElig = (e: QueueEntry) => e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId);
 
-    // Only borrow if this section has no eligible of its own
-    if (eligCountBySection[slot.section] > 0) continue;
-
-    // Take first donor
-    const pick = donors.shift()!;
-    const donorBucket = qBuckets[pick.section];
-
-    // Remove the exact entry from its original bucket (in case indices shifted)
-    const bi = donorBucket.findIndex(
-      e => e.guardId === pick.entry.guardId && e.enteredTick === pick.entry.enteredTick
-    );
-    if (bi !== -1) donorBucket.splice(bi, 1);
-
-    // Seat them
-    nextAssigned[slot.seat] = pick.entry.guardId;
-    seatedThisTick.add(pick.entry.guardId);
-
-    // Update counts: we consumed a donor and this section now has one less empty
-    // (No need to bump eligCountBySection[slot.section]; they’re seated now, not eligible)
-  }
-}
-
-// (optional) diagnostics
-if (process.env.NODE_ENV !== "production") {
-  const stats = SECTIONS.map(s => {
+  const emptySeats: SeatRef[] = [];
+  for (const s of SECTIONS) {
     const seats = seatsBySection[s];
-    const empty = seats.filter(id => !nextAssigned[id]).length;
-    const elig = (qBuckets[s] ?? []).filter(isEligible).length;
-    return { section: s, emptySeats: empty, eligibleQ: elig, bucketSize: (qBuckets[s] ?? []).length };
-  });
-  console.log("[balance.debug]", { tick: currentTick, prevWasAdult, stats });
-}
-
-
-
-
-
-  // 4) Build outgoing queue (unchanged)
-const outQueue: QueueEntry[] = [];
-const seen = new Set<string>();
-for (const s of SECTIONS) {
-  for (const q of qBuckets[s]) {
-    if (seatedThisTick.has(q.guardId)) continue;
-    if (seen.has(q.guardId)) continue;
-    seen.add(q.guardId);
-    outQueue.push(q);
+    for (let i = seats.length - 1; i >= 0; i--) {
+      const seatId = seats[i];
+      if (!nextAssigned[seatId]) emptySeats.push({ section: s, seat: seatId, idx: i });
+    }
   }
-}
+
+  if (emptySeats.length) {
+    const eligCountBySection: Record<string, number> = {};
+    for (const s of SECTIONS) {
+      eligCountBySection[s] = (qBuckets[s] ?? []).filter(isElig).length;
+    }
+
+    type Donor = { section: string; entry: QueueEntry };
+    const donors: Donor[] = [];
+    for (const s of SECTIONS) {
+      const bucket = qBuckets[s];
+      if (!bucket?.length) continue;
+      const eligIdxs: number[] = [];
+      for (let i = 0; i < bucket.length; i++) if (isElig(bucket[i])) eligIdxs.push(i);
+
+      const surplus = Math.max(0, eligIdxs.length - 1); // keep 1 eligible for own entry seat
+      for (let k = 0; k < surplus; k++) {
+        donors.push({ section: s, entry: bucket[eligIdxs[k]] });
+      }
+    }
+
+    for (const slot of emptySeats) {
+      if (!donors.length) break;
+      if (eligCountBySection[slot.section] > 0) continue;
+
+      const pick = donors.shift()!;
+      const donorBucket = qBuckets[pick.section];
+
+      const bi = donorBucket.findIndex(
+        (e) => e.guardId === pick.entry.guardId && e.enteredTick === pick.entry.enteredTick
+      );
+      if (bi !== -1) donorBucket.splice(bi, 1);
+
+      nextAssigned[slot.seat] = pick.entry.guardId;
+      seatedThisTick.add(pick.entry.guardId);
+    }
+  }
+
+  // 4) Build outgoing queue snapshot
+  const outQueue: QueueEntry[] = [];
+  const seen = new Set<string>();
+  for (const s of SECTIONS) {
+    for (const q of qBuckets[s]) {
+      if (seatedThisTick.has(q.guardId)) continue;
+      if (seen.has(q.guardId)) continue;
+      seen.add(q.guardId);
+      outQueue.push(q);
+    }
+  }
+
   if (process.env.NODE_ENV !== "production") {
     console.log("[rotation.debug] RESULT", {
       tick: currentTick,
-      period: adult ? "ADULT_SWIM" : "ALL_AGES",
+      period: "ALL_AGES",
       assigned: Object.entries(nextAssigned).map(([seat, guard]) => ({
         seat,
         guard: guard ?? "—",
       })),
-      queues: SECTIONS.map(s => ({
+      queues: SECTIONS.map((s) => ({
         section: s,
-        queue: qBuckets[s].map(q =>
-          `${q.guardId}(tick:${q.enteredTick})`
-        ),
+        queue: qBuckets[s].map((q) => `${q.guardId}(tick:${q.enteredTick})`),
       })),
     });
   }
-function sectionStats() {
-  return SECTIONS.map(s => {
-    const seats = seatsBySection[s];
-    const empty = seats.filter(id => !nextAssigned[id]).length;
-    const eligible = (qBuckets[s] ?? []).filter(e => e.enteredTick < currentTick).length;
-    return { section: s, emptySeats: empty, eligibleQ: eligible, bucketSize: (qBuckets[s] ?? []).length };
-  });
-}
 
-console.log("[balance.debug]", {
-  tick: currentTick,
-  prevWasAdult,
-  stats: sectionStats(),
-});
-return {
-  nextAssigned,
-  nextBreaks: breaks,
-  conflicts: [],
-  meta: {
-    period: adult ? "ADULT_SWIM" : "ALL_AGES",
-    breakQueue: outQueue,
-    queuesBySection: qBuckets, // expose final per-section queues
-  },
-};
+  return {
+    nextAssigned,
+    nextBreaks: breaks,
+    conflicts: [],
+    meta: {
+      period: "ALL_AGES",
+      breakQueue: outQueue,
+      queuesBySection: qBuckets,
+    },
+  };
 }

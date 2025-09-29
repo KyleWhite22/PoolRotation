@@ -42,4 +42,12 @@ export const VIEWBOX = { x: 0, y: 20, width: 200, height: 200 };
 export const POOL_PATH_D =
   "m 27.139815,77.126139 107.639265,0.306665 4.7533,-9.9666 -0.15333,-19.779864 23.45983,0.153332 0.15334,19.626532 5.36663,12.113252 0.61332,62.559574 -90.466041,0.15333 -0.153332,34.95976 -52.286309,0.30667 z";
 
-export const REST_STATIONS = new Set<string>(["1.3", "2.2", "3.1"]);
+  // export const REST_STATIONS = new Set<string>(["1.3", "2.2", "3.1"]);
+
+export const REST_BY_SECTION: Record<string, string | null> = {
+  "1": "1.3",    // section 1's designated rest chair
+  "2": "2.2",    // section 2's designated rest chair
+  "3": "3.1",    // section 3's designated rest chair
+  "4": null,     // section 4 has no rest chair (example)
+  // add more sections as needed...
+};
