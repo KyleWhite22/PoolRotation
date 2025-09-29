@@ -47,7 +47,7 @@ export default function CreateGuardModal({
               className="w-full rounded bg-pool-800 p-2 text-white outline-none"
               value={name}
               onChange={e => setName(e.target.value)}
-              placeholder="John Doe"
+              placeholder=""
             />
           </div>
           <div>

@@ -1,61 +1,67 @@
-import { useMemo } from "react";
-
-export type Guard = {
-  id: string;
-  name: string;
-  dob: string;
-};
+// GuardPickerModal.tsx (simplified)
+import { useState } from "react";
+import type { Guard } from "../../lib/types";
 
 export default function GuardPickerModal({
   open,
   onClose,
+  onSelect,
   guards,
   alreadyAssignedIds,
-  onSelect,
-  title = "Assign Guard"
+  title,
 }: {
   open: boolean;
   onClose: () => void;
+  onSelect: (guardId: string) => void;
   guards: Guard[];
   alreadyAssignedIds: string[];
-  onSelect: (guardId: string) => void;
-  title?: string;
+  title: string;
 }) {
-  const available = useMemo(
-    () => guards.filter(g => !alreadyAssignedIds.includes(g.id)),
-    [guards, alreadyAssignedIds]
+  const [search, setSearch] = useState("");
+
+  const filtered = guards.filter(
+    g =>
+      g.name.toLowerCase().includes(search.toLowerCase()) &&
+      !alreadyAssignedIds.includes(g.id)
   );
 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-[360px] max-h-[80vh] overflow-y-auto rounded-lg bg-pool-900 p-6 shadow-xl">
-        <h2 className="mb-4 text-lg font-semibold text-white">{title}</h2>
-        {available.length === 0 && (
-          <p className="text-slate-300 text-sm">No available guards</p>
-        )}
-        <ul className="space-y-2">
-          {available.map(g => (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+      <div className="bg-slate-800 rounded-lg p-4 max-w-sm w-full">
+        <h2 className="text-lg font-semibold mb-2">{title}</h2>
+
+        {/* IMPORTANT: don't split on spaces, just allow them */}
+        <input
+          className="w-full mb-3 p-2 rounded bg-slate-700"
+          placeholder="Search guard…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+
+        <ul className="max-h-48 overflow-y-auto">
+          {filtered.map(g => (
             <li key={g.id}>
               <button
-                className="w-full flex items-center justify-between rounded bg-pool-800 px-3 py-2 hover:bg-pool-700 text-left"
-                onClick={() => onSelect(g.id)}
+                className="w-full text-left px-2 py-1 hover:bg-slate-700 rounded"
+                onClick={() => {
+                  onSelect(g.id);
+                  onClose();
+                }}
               >
-                <span className="text-white">{g.name}</span>
-                <span className="text-xs text-slate-400">{g.dob}</span>
+                {g.name}
               </button>
             </li>
           ))}
         </ul>
-        <div className="mt-5 flex justify-end">
-          <button
-            onClick={onClose}
-            className="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 text-sm"
-          >
-            Close
-          </button>
-        </div>
+
+        <button
+          onClick={onClose}
+          className="mt-3 px-3 py-1 bg-slate-600 rounded hover:bg-slate-500"
+        >
+          Cancel
+        </button>
       </div>
     </div>
   );

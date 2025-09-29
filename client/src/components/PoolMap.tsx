@@ -49,7 +49,7 @@ export default function PoolMap({
     <svg
       viewBox={`${VIEWBOX.x} ${VIEWBOX.y} ${VIEWBOX.width} ${VIEWBOX.height}`}
       // Let it grow: fill width, take ~88% of viewport height (fallback to your prop)
-      className={className ?? "w-full h-[88vh]"} 
+      className={className ?? "w-full h-[88vh]"}
       role="img"
       aria-label="Pool map"
       preserveAspectRatio="xMidYMid meet"
@@ -65,49 +65,61 @@ export default function PoolMap({
       </defs>
 
       {/* Draw ALL shapes from POOL_SHAPES */}
-      {POOL_SHAPES.map((s, i) =>
-        s.type === "path" ? (
-          <path
-            key={`shape-${i}`}
-            d={s.d}
-            fill={i === 0 ? "#bae6fd" : "none"}   // fill the main pool outline (adjust index if needed)
-            stroke="#7ba7edff"
-            strokeWidth={0.8}
-            opacity={i === 0 ? 1 : 0.9}
-            vectorEffect="non-scaling-stroke"
-          />
-        ) : (
-          <rect
-            key={`shape-${i}`}
-            x={s.x}
-            y={s.y}
-            width={s.width}
-            height={s.height}
-            fill="none"
-            stroke="#7ba7edff"
-            strokeWidth={0.8}
-            opacity={0.9}
-            vectorEffect="non-scaling-stroke"
-          />
-        )
-      )}
+     {POOL_SHAPES.map((s, i) =>
+  s.type === "path" ? (
+    <path
+      key={`shape-${i}`}
+      d={s.d}
+      fill={i === 0 ? "#bae6fd" : "none"}
+      stroke="#7ba7edff"
+      strokeWidth={0.8}
+      opacity={i === 0 ? 1 : 0.9}
+      vectorEffect="non-scaling-stroke"
+      pointerEvents="none"        // ⬅️ ignore clicks
+    />
+  ) : (
+    <rect
+      key={`shape-${i}`}
+      x={s.x}
+      y={s.y}
+      width={s.width}
+      height={s.height}
+      fill="none"
+      stroke="#7ba7edff"
+      strokeWidth={0.8}
+      opacity={0.9}
+      vectorEffect="non-scaling-stroke"
+      pointerEvents="none"        // ⬅️ ignore clicks
+    />
+  )
+)}
+
 
       {/* Edges */}
+      {/* edges */}
       {EDGES.map((e) => {
         const a = POSITIONS.find((p) => p.id === e.from)!;
         const b = POSITIONS.find((p) => p.id === e.to)!;
+
+        // Visual “seat box” footprint (even if you’re not drawing boxes)
         const boxW = 30, boxH = 22;
-        const pad = Math.hypot(boxW, boxH) / 2 - 5;
+        const pad = Math.hypot(boxW, boxH) / 2 - 5; // distance to inset from each seat
+
         const dx = b.x - a.x, dy = b.y - a.y;
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len, uy = dy / len;
-        const x2 = b.x - ux * pad, y2 = b.y - uy * pad;
+
+        // Inset start *and* end by the same padding
+        const x1 = a.x + ux * pad;
+        const y1 = a.y + uy * pad;
+        const x2 = b.x - ux * pad;
+        const y2 = b.y - uy * pad;
 
         return (
           <line
             key={`${e.from}-${e.to}`}
-            x1={a.x}
-            y1={a.y}
+            x1={x1}
+            y1={y1}
             x2={x2}
             y2={y2}
             stroke="#60a5fa"
@@ -120,56 +132,109 @@ export default function PoolMap({
           />
         );
       })}
+     {POSITIONS.map((p) => {
+  const guardId = assigned[p.id] ?? null;
+  const name = guardId ? guardNameById.get(guardId) ?? "" : "";
+  const [first, ...restParts] = name.split(" ");
+  const last = restParts.join(" ");
 
-      {/* Seats / guards */}
-      {POSITIONS.map((p) => {
-        const selectedGuardId = assigned[p.id] ?? null;
-        const has = Boolean(selectedGuardId);
-        const boxW = 20, boxH = 16;
+  const isRest = isRestSeat(p.id);
+  const isConflict = conflicts.some((c) => c.stationId === p.id);
 
-        const fullName = has ? (guardNameById.get(selectedGuardId!) ?? "") : "";
-        const [first, ...nameRest] = fullName.split(" ");
-        const last = nameRest.join(" ");
+  return (
+    <g
+      key={p.id}
+      transform={`translate(${p.x} ${p.y})`}
+      className="cursor-pointer"
+      onClick={() => onPick(p.id)}
+    >
+      {/* Invisible hit area (bigger than visuals) */}
+      <rect
+        x={-22}
+        y={-22}
+        width={44}
+        height={44}
+        fill="transparent"
+        pointerEvents="all"   // ⬅️ ensure this receives the click
+      />
 
-        const isConflict = conflicts.some((c) => c.stationId === p.id);
-        const isRest = isRestSeat(p.id);
+      {/* Rest seat outline stays visible & clickable */}
+      {isRest && (
+        <rect
+          x={-14}
+          y={-14}
+          width={28}
+          height={28}
+          rx={2}
+          fill="none"
+          stroke="#dc2626"
+          strokeWidth={1.8}
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
 
-        return (
-          <g key={p.id} transform={`translate(${p.x - boxW / 2} ${p.y - boxH / 2})`}>
-            <rect
-              width={boxW}
-              height={boxH}
-              rx={1.6}
-              className="cursor-pointer"
-              fill={has ? "#1e293b" : "rgba(2,6,23,0.5)"}
-              stroke={isRest ? "#dc2626" : isConflict ? "#ef4444" : "#64748b"}
-              strokeWidth={isRest ? 1.5 : 0.7}
-              onClick={() => onPick(p.id)}
-              vectorEffect="non-scaling-stroke"
-            />
-            <text x={boxW / 2} y={3.5} textAnchor="middle" fontSize="3" fill="#9cc2ff">
-              {p.label}
-            </text>
+     {guardId ? (
+  last ? (
+    <>
+      {/* Two lines if there is a first and last */}
+      <text
+        x={0}
+        y={-2}
+        textAnchor="middle"
+        fontSize="7"
+        fill="#f1f5f9"
+      >
+        {first}
+      </text>
+      <text
+        x={0}
+        y={8}
+        textAnchor="middle"
+        fontSize="7"
+        fill="#f1f5f9"
+      >
+        {last}
+      </text>
+    </>
+  ) : (
+    /* Single line if only one word */
+    <text
+      x={0}
+      y={3}           // <- center the single name in the seat
+      textAnchor="middle"
+      fontSize="8"
+      fill="#f1f5f9"
+    >
+      {first}
+    </text>
+  )
+) : (
+  <text
+    x={0}
+    y={3}
+    textAnchor="middle"
+    fontSize="10"
+    fill="#f1f5f9"
+  >
+    X
+  </text>
+)}
 
-            {has ? (
-              <>
-                <text x={boxW / 2} y={7.5} textAnchor="middle" fontSize="3" fill="#e2e8f0">
-                  {first}
-                </text>
-                {last && (
-                  <text x={boxW / 2} y={11.5} textAnchor="middle" fontSize="3" fill="#e2e8f0">
-                    {last}
-                  </text>
-                )}
-              </>
-            ) : (
-              <text x={boxW / 2} y={11} textAnchor="middle" fontSize="6" fill="#e2e8f0">
-                X
-              </text>
-            )}
-          </g>
-        );
-      })}
+
+      {isConflict && (
+        <circle
+          cx={0}
+          cy={0}
+          r={16}
+          fill="none"
+          stroke="#ef4444"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+    </g>
+  );
+})}
     </svg>
   );
 }
