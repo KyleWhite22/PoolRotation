@@ -1,14 +1,10 @@
-// backend/src/engine/rotation.ts
 console.log("[engine/rotation] LOADED");
 import { POSITIONS, REST_BY_SECTION } from "../../../shared/data/poolLayout.js";
 
 export type Guard = { id: string; name: string; dob: string };
 export type Assigned = Record<string, string | null>;
 export type BreakState = Record<string, string>;
-
-// Queue entries carry enteredTick (integer "15-min tick" index)
 export type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
-
 export type Conflict = { stationId: string; reason: "AGE_RULE"; guardId: string };
 
 export type EngineOutput = {
@@ -27,7 +23,6 @@ const SECTIONS = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).s
   (a, b) => Number(a) - Number(b)
 );
 
-// seats ordered within section
 const seatsBySection: Record<string, string[]> = (() => {
   const m: Record<string, string[]> = {};
   for (const s of SECTIONS) m[s] = [];
@@ -50,9 +45,8 @@ const restChairBySection: Record<string, string | null> = (() => {
   return m;
 })();
 
-const firstSeatBySection: Record<string, string> = Object.fromEntries(
-  SECTIONS.map((s) => [s, seatsBySection[s][0]])
-);
+const firstSeatBySection: Record<string, string> =
+  Object.fromEntries(SECTIONS.map((s) => [s, seatsBySection[s][0]]));
 
 const lastSeatSet = new Set<string>(
   SECTIONS.map((s) => seatsBySection[s][seatsBySection[s].length - 1])
@@ -63,6 +57,8 @@ const sectionBySeat: Record<string, string> = (() => {
   for (const s of SECTIONS) for (const seat of seatsBySection[s]) m[seat] = s;
   return m;
 })();
+
+const isEligibleAt = (entry: QueueEntry, tick: number) => entry.enteredTick < tick;
 const isEligibleAtOrSame = (entry: QueueEntry, tick: number) => entry.enteredTick <= tick;
 
 function nextSectionId(sec: string): string {
@@ -71,41 +67,32 @@ function nextSectionId(sec: string): string {
 }
 
 function tickIndexFromISO(nowISO: string): number {
-  // 1 tick per 15 minutes since epoch
-  const ms = Date.parse(nowISO);
-  return Math.floor(ms / (15 * 60 * 1000));
+  return Math.floor(Date.parse(nowISO) / (15 * 60 * 1000)); // 15-min ticks
 }
-function minuteOfHourUTC(nowISO: string): number {
+function minuteOfHourLocal(nowISO: string): number {
   const d = new Date(nowISO);
-  return d.getUTCMinutes();
+  return d.getMinutes();
 }
 function isAdultSwimFromISO(nowISO: string): boolean {
-  return minuteOfHourUTC(nowISO) === 45;
+  return minuteOfHourLocal(nowISO) === 45;
 }
-
-// ---- helpers ---------------------------------------------------------------
-const isEligibleAt = (entry: QueueEntry, tick: number) => entry.enteredTick < tick;
 
 /**
  * Adult-swim (:45) step:
- * - Everyone leaves their seats.
- *   - If a guard WAS on a section's last seat before :45, they move to the NEXT section's queue
- *     with a 30-min break credit => ineligible for 2 ticks (enteredTick = currentTick + 2).
- *   - All others go to their CURRENT section's queue, eligible immediately at :00 (enteredTick = currentTick).
- * - For each section that has a rest chair, the guard who would have started at the first chair
- *   (i.e., next usable from that section's queue) is seated on that rest chair for :45–:00.
+ * - Clear seats;
+ * - Last-seat guards go to NEXT section with +2 ticks (30 min) credit;
+ * - Others go to their CURRENT section queue eligible at :00 (enteredTick = currentTick);
+ * - If a section has a rest chair, seat the next eligible from that section (<= currentTick).
  */
 function tickAdultSwim(
   assignedBefore: Assigned,
   qBuckets: Record<string, QueueEntry[]>,
   currentTick: number
 ) {
-  // Clear seating for the :45 frame; we only show rest chairs during adult swim
   const nextAssigned: Assigned = Object.fromEntries(
     POSITIONS.map((p) => [p.id, null as string | null])
   );
 
-  // 1) Move seated guards to queues according to end/non-end rules
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     const lastSeat = seats[seats.length - 1];
@@ -115,24 +102,21 @@ function tickAdultSwim(
       if (!gid) continue;
 
       if (seat === lastSeat) {
-        // End-of-section before :45 -> next section queue, 30-min break (2 ticks wait)
         const nxt = nextSectionId(s);
         qBuckets[nxt].push({ guardId: gid, returnTo: nxt, enteredTick: currentTick + 2 });
       } else {
-        // Not end -> current section queue, eligible at :00
         qBuckets[s].push({ guardId: gid, returnTo: s, enteredTick: currentTick });
       }
     }
   }
 
-  // 2) Seat rest guard (if any) per section by popping next usable for that section
   const seatedAtRest = new Set<string>();
   for (const s of SECTIONS) {
     const restSeat = restChairBySection[s];
     if (!restSeat) continue;
 
     const bucket = qBuckets[s];
-const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick)); // enteredTick <= currentTick
+    const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick)); // <= currentTick
     if (idx !== -1) {
       const [entry] = bucket.splice(idx, 1);
       nextAssigned[restSeat] = entry.guardId;
@@ -146,7 +130,7 @@ const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick)); // ente
 // ---- core stepper -----------------------------------------------------------
 export function computeNext({
   assigned,
-  guards, // unused for now (kept for future rules)
+  guards, // reserved for future rules
   breaks,
   queue = [],
   nowISO,
@@ -160,27 +144,29 @@ export function computeNext({
   const currentTick = tickIndexFromISO(nowISO);
   const adult = isAdultSwimFromISO(nowISO);
 
-  // Normalize queue buckets; clamp bad/missing enteredTick to currentTick
+  // Normalize queue into per-section buckets.
+  // IMPORTANT: keep future ticks (e.g., +2 after last seat); do not clamp down to currentTick.
   const qBuckets: Record<string, QueueEntry[]> = {};
   for (const s of SECTIONS) qBuckets[s] = [];
   for (const raw of queue) {
     const sec = String(raw?.returnTo ?? "");
     const gid = String(raw?.guardId ?? "");
+    const etRaw = (raw as any)?.enteredTick;
     const et =
-      typeof (raw as any)?.enteredTick === "number" && Number.isFinite((raw as any).enteredTick)
-        ? Math.trunc((raw as any).enteredTick)   // keep future ticks (e.g., +2 after last seat)
+      typeof etRaw === "number" && Number.isFinite(etRaw)
+        ? Math.trunc(etRaw)
+        : typeof etRaw === "string" && /^\d+$/.test(etRaw)
+        ? Math.trunc(parseInt(etRaw, 10))
         : currentTick;
 
     if (!gid || !SECTIONS.includes(sec)) continue;
     qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: et });
   }
 
-
   // ADULT SWIM FRAME ---------------------------------------------------------
   if (adult) {
     const { nextAssigned, seatedAtRest } = tickAdultSwim(assigned, qBuckets, currentTick);
 
-    // Outgoing queue: flatten per-section buckets, excluding those we seated on rest
     const seen = new Set<string>();
     const queuedOutAdult: QueueEntry[] = [];
     for (const s of SECTIONS) {
@@ -211,16 +197,17 @@ export function computeNext({
   const seatedThisTick = new Set<string>();
 
   // Was the PREVIOUS frame adult swim?
-const prevWasAdult = (() => {
-  const prevISO = new Date(Date.parse(nowISO) - 15 * 60 * 1000).toISOString();
-  return isAdultSwimFromISO(prevISO);
-})();
-  // Start from a working copy
+  const prevWasAdult = (() => {
+    const prevISO = new Date(Date.parse(nowISO) - 15 * 60 * 1000).toISOString();
+    return isAdultSwimFromISO(prevISO);
+  })();
+
+  // Working copy of current seats
   const assignedStart: Assigned = Object.fromEntries(
     POSITIONS.map((p) => [p.id, assigned[p.id] ?? null])
   );
 
-  // Collect rest returners; we’ll seat them on first chair AFTER the shift
+  // Rest returners: move off rest seat and place on entry seat after shift
   const restReturners: Record<string, string> = {};
   if (prevWasAdult) {
     for (const s of SECTIONS) {
@@ -228,13 +215,13 @@ const prevWasAdult = (() => {
       if (!restSeat) continue;
       const gid = assignedStart[restSeat];
       if (gid) {
-        assignedStart[restSeat] = null; // remove from rest seat before shifting
-        restReturners[s] = gid;         // place on first chair after shift
+        assignedStart[restSeat] = null;
+        restReturners[s] = gid;
       }
     }
   }
 
-  // 1) End-of-section → enqueue into NEXT section
+  // 1) End-of-section → enqueue into NEXT section (eligible this tick)
   const toEnqueue: Array<{ sec: string; gid: string }> = [];
   for (const seat of Object.keys(assignedStart)) {
     const gid = assignedStart[seat];
@@ -253,7 +240,7 @@ const prevWasAdult = (() => {
     });
   }
 
-  // ---- 1b) Queue balancing
+  // 1b) Balance queues so every section has at least 1 eligible
   {
     const isElig = (e: QueueEntry) => isEligibleAt(e, currentTick);
 
@@ -307,31 +294,25 @@ const prevWasAdult = (() => {
     }
   }
 
-  // 2b) Seat rest returners directly onto first chair AFTER the shift
+  // 2b) Seat rest returners onto first chair AFTER the shift
   if (prevWasAdult) {
     for (const s of SECTIONS) {
       const gid = restReturners[s];
       if (!gid) continue;
       const entrySeat = firstSeatBySection[s];
-      nextAssigned[entrySeat] = gid; // ensure they truly start on the first chair
+      nextAssigned[entrySeat] = gid;
       seatedThisTick.add(gid);
     }
   }
 
   // 3) Refill from each section's queue
-  // If previous tick was adult swim, preserve order:
-  // - If no rest chair returner, fill entry seat from queue.
-  // - Then fill seats left→right starting at index 1.
-  // Otherwise (ordinary tick), fill only the entry seat.
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     const bucket = qBuckets[s];
 
     if (prevWasAdult) {
-      // prevWasAdult: fill entry if no rest chair, then seats 1..
+      // Fill entry if not filled yet
       const entrySeat = seats[0];
-
-      // 3a) Ensure entry seat is filled when the section has no rest chair
       if (!nextAssigned[entrySeat]) {
         const idx0 = bucket.findIndex(
           (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
@@ -342,11 +323,10 @@ const prevWasAdult = (() => {
           seatedThisTick.add(entry.guardId);
         }
       }
-
-      // 3b) Fill remaining seats left→right (indices 1..N-1) to preserve queue order
+      // Fill remaining seats left→right
       for (let i = 1; i < seats.length; i++) {
         const seat = seats[i];
-        if (nextAssigned[seat]) continue; // already filled by shift
+        if (nextAssigned[seat]) continue;
         const idx = bucket.findIndex(
           (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
         );
@@ -356,10 +336,9 @@ const prevWasAdult = (() => {
         seatedThisTick.add(entry.guardId);
       }
     } else {
-      // Ordinary tick: only the entry seat
+      // Ordinary tick: only entry seat
       const entrySeat = seats[0];
       if (!nextAssigned[entrySeat]) {
-        // prefer truly eligible; if none, allow same-tick fallbacks to avoid gaps
         let idx = bucket.findIndex(
           (e) => isEligibleAt(e, currentTick) && !seatedThisTick.has(e.guardId)
         );
@@ -377,7 +356,7 @@ const prevWasAdult = (() => {
     }
   }
 
-  // 3b) Global borrowing pass
+  // 3b) Global borrowing: fill holes using surplus eligibles from other sections
   type SeatRef = { section: string; seat: string; idx: number };
   const isElig = (e: QueueEntry) => e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId);
 
