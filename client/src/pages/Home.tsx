@@ -5,6 +5,7 @@ import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
 import CreateGuardModal from "../components/modals/CreateGuardModal";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
+import GuardsListModal from "../components/modals/GuardsListModal"; // <-- NEW
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
 import type { Guard } from "../lib/types";
 
@@ -35,6 +36,7 @@ export default function Home() {
   const [pickerFor, setPickerFor] = useState<string | null>(null); // seat assignment
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
   const [createOpen, setCreateOpen] = useState(false);
+  const [listOpen, setListOpen] = useState(false); 
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -358,15 +360,35 @@ export default function Home() {
   };
 
   // -------- Render --------
-  return (
-  <AppShell title="Lifeguard Rotation Manager">
-    {/* Responsive layout: map + sidebar (right on lg, stacked on small) */}
-    <div className="grid gap-6 lg:grid-cols-[1fr,380px]">
+ return (
+  <AppShell
+    title="Lifeguard Rotation Manager"
+    actions={
+      <>
+        <button
+          type="button"
+          onClick={() => setListOpen(true)}
+          className="px-3 py-1.5 rounded bg-pool-500 hover:bg-pool-400 text-sm"
+        >
+          List Guards
+        </button>
+        <button
+          type="button"
+          onClick={() => setCreateOpen(true)}
+          className="px-3 py-1.5 rounded bg-pool-500 hover:bg-pool-400 text-sm"
+        >
+          New Guard
+        </button>
+      </>
+    }
+  >
+    {/* Main layout: map left, tools/queue right on lg; stacked on mobile */}
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
       {/* LEFT: Pool map */}
       <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
         <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
         <PoolMap
-          className="w-full h-[70vh] lg:h-[82vh]" // tall on desktop
+          className="w-full h-[70vh] lg:h-[82vh]"
           guards={guards}
           assigned={assigned}
           onPick={(positionId) => setPickerFor(positionId)}
@@ -449,6 +471,12 @@ export default function Home() {
       }}
       title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
     />
+
+  <GuardsListModal
+  open={listOpen}
+  onClose={() => setListOpen(false)}
+  guards={guards}
+/>
   </AppShell>
 );
 
