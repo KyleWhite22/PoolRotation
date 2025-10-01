@@ -110,6 +110,11 @@ router.post("/rotate", async (req, res) => {
   const out = computeNext({ assigned, guards, breaks, queue, nowISO });
   // in /api/plan/rotate, right after `const out = computeNext(...)`
 if (process.env.NODE_ENV !== "production") {
+  console.log("[rotate.debug] buckets", Object.fromEntries(
+    Object.entries(out.meta.queuesBySection).map(([s, arr]) => [s, arr.map(e => `${e.guardId}@${e.enteredTick}`)])
+  ));
+}
+  if (process.env.NODE_ENV !== "production") {
   const assignedIn  = Object.values(assigned).filter(Boolean).length;
   const assignedOut = Object.values(out.nextAssigned).filter(Boolean).length;
   const queueLen    = out.meta.breakQueue.length;
@@ -165,13 +170,17 @@ await ddb.send(new PutCommand({
   },
 }));
 
-  res.json({
-    assigned: out.nextAssigned,
-    breaks: out.nextBreaks,
-    conflicts: out.conflicts,
-    meta: { period: out.meta.period, breakQueue: out.meta.breakQueue },
-    nowISO,
-  });
+ res.json({
+  assigned: out.nextAssigned,
+  breaks: out.nextBreaks,
+  conflicts: out.conflicts,
+  meta: {
+    period: out.meta.period,
+    breakQueue: out.meta.breakQueue,
+    queuesBySection: out.meta.queuesBySection, // <-- add this
+  },
+  nowISO,
+});
 });
 
 // --- Queue helpers -----------------------------------------------------------
@@ -443,15 +452,22 @@ router.post("/autopopulate", async (req, res) => {
       },
     }));
   }
-
+const queuesBySection = Object.fromEntries(
+  SECTIONS.map(s => [s, queue.filter(q => q.returnTo === s)])
+);
   // 6) Respond
-  res.json({
-    assigned: nextAssigned,
-    breaks: {},
-    conflicts: [],
-    meta: { period: "ALL_AGES", breakQueue: queue },
-    nowISO,
-  });
+res.json({
+  assigned: nextAssigned,
+  breaks: {},
+  conflicts: [],
+  meta: {
+    period: "ALL_AGES",
+    breakQueue: queue,
+    queuesBySection, // <-- add this
+  },
+  nowISO,
+});
+
 });
 
 export default router;

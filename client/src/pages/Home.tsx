@@ -55,7 +55,10 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
   }, [simulatedNow]);
-
+useEffect(() => {
+  // eslint-disable-next-line no-console
+  console.log("queuesBySection", queuesBySection);
+}, [queuesBySection]);
   // All API traffic must use this key (prevents UTC day drift)
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
@@ -286,8 +289,7 @@ export default function Home() {
       if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
       // refresh flat list but DO NOT overwrite buckets we just set
       await fetchQueue({ keepBuckets: true });
-      // keep flat list in sync (fallback + persistence)
-      await fetchQueue();
+  
     } catch (e) {
       console.error("Rotate failed:", e);
     } finally {

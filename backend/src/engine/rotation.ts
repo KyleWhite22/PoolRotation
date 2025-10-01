@@ -63,6 +63,7 @@ const sectionBySeat: Record<string, string> = (() => {
   for (const s of SECTIONS) for (const seat of seatsBySection[s]) m[seat] = s;
   return m;
 })();
+const isEligibleAtOrSame = (entry: QueueEntry, tick: number) => entry.enteredTick <= tick;
 
 function nextSectionId(sec: string): string {
   const i = SECTIONS.indexOf(sec);
@@ -131,7 +132,7 @@ function tickAdultSwim(
     if (!restSeat) continue;
 
     const bucket = qBuckets[s];
-    const idx = bucket.findIndex((e) => isEligibleAt(e, currentTick)); // must have enteredTick < currentTick
+const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick)); // enteredTick <= currentTick
     if (idx !== -1) {
       const [entry] = bucket.splice(idx, 1);
       nextAssigned[restSeat] = entry.guardId;
@@ -165,15 +166,15 @@ export function computeNext({
   for (const raw of queue) {
     const sec = String(raw?.returnTo ?? "");
     const gid = String(raw?.guardId ?? "");
-    const etRaw =
+    const et =
       typeof (raw as any)?.enteredTick === "number" && Number.isFinite((raw as any).enteredTick)
-        ? (raw as any).enteredTick
+        ? Math.trunc((raw as any).enteredTick)   // keep future ticks (e.g., +2 after last seat)
         : currentTick;
 
-    const et = Math.min(etRaw, currentTick);
     if (!gid || !SECTIONS.includes(sec)) continue;
     qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: et });
   }
+
 
   // ADULT SWIM FRAME ---------------------------------------------------------
   if (adult) {
@@ -210,8 +211,10 @@ export function computeNext({
   const seatedThisTick = new Set<string>();
 
   // Was the PREVIOUS frame adult swim?
-  const prevWasAdult = (((currentTick - 1) % 4) + 4) % 4 === 3;
-
+const prevWasAdult = (() => {
+  const prevISO = new Date(Date.parse(nowISO) - 15 * 60 * 1000).toISOString();
+  return isAdultSwimFromISO(prevISO);
+})();
   // Start from a working copy
   const assignedStart: Assigned = Object.fromEntries(
     POSITIONS.map((p) => [p.id, assigned[p.id] ?? null])
