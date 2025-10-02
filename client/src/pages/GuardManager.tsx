@@ -1,4 +1,4 @@
-//guardManager
+// guardManager.tsx
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "../components/AppShell";
 
@@ -34,35 +34,42 @@ export default function GuardsPage() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [createOpen, setCreateOpen] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
-  const [editGuard, setEditGuard] = useState<Guard | null>(null); // <-- NEW
+  const [editGuard, setEditGuard] = useState<Guard | null>(null);
+
   const API_HEADERS = { "x-api-key": "dev-key-123" };
 
-  // fetch guards
+  // fetch + MERGE (union by id; fetched row wins)
   const fetchGuards = async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/guards", { headers: API_HEADERS });
       if (!res.ok) throw new Error(`GET /api/guards failed: ${res.status}`);
       const data = await res.json();
-      const norm: Guard[] = Array.isArray(data)
+      const fetched: Guard[] = Array.isArray(data)
         ? data
-          .map((it: any) => {
-            const id =
-              typeof it.id === "string"
-                ? it.id
-                : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
+            .map((it: any) => {
+              const id =
+                typeof it.id === "string"
+                  ? it.id
+                  : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
                   ? it.pk.slice("GUARD#".length)
                   : "";
-            return {
-              id,
-              name: it.name ?? "",
-              dob: it.dob ?? "",
-              phone: it.phone ?? "",
-            };
-          })
-          .filter((g: Guard) => g.id)
+              return {
+                id,
+                name: it.name ?? "",
+                dob: it.dob ?? "",
+                phone: it.phone ?? "",
+              } as Guard;
+            })
+            .filter((g: Guard) => g.id)
         : [];
-      setGuards(norm);
+
+      setGuards(prev => {
+        const byId = new Map<string, Guard>();
+        for (const g of prev) byId.set(g.id, g);
+        for (const g of fetched) byId.set(g.id, g); // fetched overwrites prev
+        return Array.from(byId.values());
+      });
     } catch (e) {
       console.error(e);
     } finally {
@@ -80,8 +87,8 @@ export default function GuardsPage() {
 
     const filtered = query.trim()
       ? withAge.filter((g) =>
-        g.name.toLowerCase().includes(query.trim().toLowerCase())
-      )
+          g.name.toLowerCase().includes(query.trim().toLowerCase())
+        )
       : withAge;
 
     filtered.sort((a, b) => {
@@ -89,7 +96,8 @@ export default function GuardsPage() {
       if (sortKey === "name") {
         res = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
       } else if (sortKey === "age") {
-        const aa = a.age, bb = b.age;
+        const aa = (a as any).age as number | null;
+        const bb = (b as any).age as number | null;
         if (aa == null && bb == null) res = 0;
         else if (aa == null) res = 1;
         else if (bb == null) res = -1;
@@ -119,6 +127,9 @@ export default function GuardsPage() {
       });
       if (!res.ok) throw new Error(`DELETE /api/guards/${id} failed: ${res.status}`);
       setConfirmId(null);
+      // local remove for snappy UX
+      setGuards(prev => prev.filter(g => g.id !== id));
+      // background refresh (merge) in case of side-effects
       fetchGuards();
     } catch (e) {
       console.error("Failed to delete guard:", e);
@@ -130,7 +141,7 @@ export default function GuardsPage() {
       {/* Centered content container */}
       <div className="max-w-5xl mx-auto w-full">
         <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
-          {/* Controls: search + sort + New Guard button (all on one row on desktop) */}
+          {/* Controls */}
           <div className="flex flex-col md:flex-row md:items-center gap-3">
             <input
               value={query}
@@ -196,7 +207,7 @@ export default function GuardsPage() {
                     <td className="p-2">{g.phone || <span className="text-slate-500">—</span>}</td>
                     <td className="p-2 text-right space-x-2">
                       <button
-                        onClick={() => setEditGuard(g)}          // <-- NEW
+                        onClick={() => setEditGuard(g)}
                         className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white text-xs"
                       >
                         Edit
@@ -227,8 +238,16 @@ export default function GuardsPage() {
       {createOpen && (
         <AddGuardModal
           onClose={() => setCreateOpen(false)}
-          onCreated={() => {
+          onCreated={(created) => {
+            // optimistic insert (dedupe by id)
+            setGuards(prev => {
+              if (!created?.id) return prev;
+              const seen = new Set(prev.map(g => g.id));
+              if (seen.has(created.id)) return prev;
+              return [created, ...prev];
+            });
             setCreateOpen(false);
+            // still refresh to normalize/merge; no flicker now
             fetchGuards();
           }}
         />
@@ -249,8 +268,12 @@ export default function GuardsPage() {
       {/* Confirm Delete */}
       {confirmId && (
         <ConfirmDialog
-          title="Remove guard?"
-          body="This will permanently remove the guard. Continue?"
+          title={`Remove ${
+  guards.find(g => g.id === confirmId)?.name ?? "guard"
+}?`}
+             body={`This will permanently remove ${
+      guards.find(g => g.id === confirmId)?.name ?? "this guard"
+    }. `}
           onCancel={() => setConfirmId(null)}
           onConfirm={() => removeGuard(confirmId)}
         />
@@ -265,13 +288,12 @@ function AddGuardModal({
   onCreated,
 }: {
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (g: Guard) => void;
 }) {
   const [name, setName] = useState("");
   const [dob, setDob] = useState(""); // YYYY-MM-DD
   const [phone, setPhone] = useState("");
   const [saving, setSaving] = useState(false);
-  const API_HEADERS = { "Content-Type": "application/json", "x-api-key": "dev-key-123" };
 
   const canSave = name.trim().length > 0;
 
@@ -281,21 +303,41 @@ function AddGuardModal({
     try {
       const res = await fetch("/api/guards", {
         method: "POST",
-        headers: API_HEADERS,
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           name: name.trim(),
-          dob: dob || null,
-          phone: phone || null,
+          dob: (dob ?? "").trim() || null,      // send null when empty
+          phone: (phone ?? "").trim() || null,  // send null when empty
         }),
       });
+
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`POST /api/guards failed (${res.status}): ${text}`);
+        let msg = `POST /api/guards failed (${res.status})`;
+        try {
+          const data = await res.json();
+          msg += `\n` + JSON.stringify(data, null, 2);
+        } catch {
+          const text = await res.text().catch(() => "");
+          if (text) msg += `\n${text}`;
+        }
+        throw new Error(msg);
       }
-      onCreated();
-    } catch (e) {
+
+      const created = await res.json();
+      const g: Guard = {
+        id:
+          created?.id ??
+          (typeof created?.pk === "string" && created.pk.startsWith("GUARD#")
+            ? created.pk.slice(6)
+            : ""),
+        name: created?.name ?? name.trim(),
+        dob: created?.dob ?? (dob || ""),
+        phone: created?.phone ?? (phone || ""),
+      };
+      onCreated(g);
+    } catch (e: any) {
       console.error("Failed to create guard:", e);
-      alert("Failed to create guard. Check console for details.");
+      alert(e.message || "Failed to create guard. Check console for details.");
     } finally {
       setSaving(false);
     }
@@ -381,7 +423,6 @@ function EditGuardModal({
     setSaving(true);
     try {
       const body: Record<string, any> = { name: name.trim() };
-      // include fields even if cleared -> send null to wipe, or send "" if you prefer keep empty string
       body.dob = dob || null;
       body.phone = phone || null;
 
@@ -395,9 +436,9 @@ function EditGuardModal({
         throw new Error(`PUT /api/guards/${guard.id} failed (${res.status}): ${text}`);
       }
       onSaved();
-    } catch (e) {
+    } catch (e: any) {
       console.error("Failed to update guard:", e);
-      alert("Failed to update guard. Check console for details.");
+      alert(e.message || "Failed to update guard. Check console for details.");
     } finally {
       setSaving(false);
     }

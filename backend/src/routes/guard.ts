@@ -11,11 +11,12 @@ const router = Router();
 // ------- list guards -------
 router.get("/", async (_req: Request, res: Response) => {
   try {
-    const scan = await ddb.send(new ScanCommand({
+   const scan = await ddb.send(new ScanCommand({
       TableName: TABLE,
       FilterExpression: "begins_with(pk, :p)",
-      ExpressionAttributeValues: { ":p": "GUARD#" },
-    }));
+   ExpressionAttributeValues: { ":p": "GUARD#" },
+     ConsistentRead: true, // <- read-your-writes so the new guard shows up immediately
+   }));
     res.json(scan.Items ?? []);
   } catch (err) {
     console.error("GET /api/guards error:", err);
@@ -27,29 +28,32 @@ router.get("/", async (_req: Request, res: Response) => {
 router.post("/", async (req: Request, res: Response) => {
   try {
     const parsed = GuardCreate.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json(parsed.error.flatten());
+    if (!parsed.success) {
+      // helpful logging
+      console.warn("GuardCreate validation failed:", parsed.error.flatten());
+      return res.status(400).json(parsed.error.flatten());
+    }
 
     const id = crypto.randomUUID();
     const item = {
       pk: `GUARD#${id}`,
       sk: "METADATA",
       type: "Guard",
-      name: parsed.data.name,
-      // store empty strings as undefined? Up to you. Here we pass through.
-      dob: parsed.data.dob ?? null,
-      phone: parsed.data.phone ?? null,
+      name: parsed.data.name,            // already trimmed
+      dob: parsed.data.dob ?? null,      // may be null
+      phone: parsed.data.phone ?? null,  // may be null
       createdAt: new Date().toISOString(),
     };
 
     await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
-    res.status(201).json({ id, ...item });
+    // include the id in a stable place
+    res.status(201).json({ id, name: item.name, dob: item.dob, phone: item.phone });
   } catch (err: any) {
     console.error("POST /api/guards error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to create guard", detail: err?.name || err?.message || String(err) });
+    res.status(500).json({ error: "Failed to create guard", detail: err?.name || err?.message || String(err) });
   }
 });
+
 
 // ------- update guard (PUT) -------
 router.put("/:id", async (req: Request, res: Response) => {

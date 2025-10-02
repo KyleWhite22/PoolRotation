@@ -1,22 +1,35 @@
 import { z } from "zod";
 
+// Helpers that coerce "", "  ", undefined, null -> null (and trim strings)
+const toNullIfBlank = (v: unknown) => {
+  if (v == null) return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    return t === "" ? null : t;
+  }
+  return v;
+};
+
+const DobNullable = z.preprocess(
+  toNullIfBlank,
+  z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "DOB must be YYYY-MM-DD").nullable()
+);
+
+const PhoneNullable = z.preprocess(
+  toNullIfBlank,
+  z.string().nullable()
+);
+
 export const GuardCreate = z.object({
-  name: z.string().min(1),
-  dob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "DOB must be YYYY-MM-DD"),
-  phone: z.string().optional().nullable(), 
+  name: z.string().trim().min(1, "Name is required"),
+  dob: DobNullable.optional(),     // trims; ""/null/undefined -> null; else YYYY-MM-DD
+  phone: PhoneNullable.optional(), // trims; ""/null/undefined -> null; else string
 });
 export type GuardCreate = z.infer<typeof GuardCreate>;
 
-export const RotationSlot = z.object({
-  date: z.string(),          // "YYYY-MM-DD"
-  time: z.string(),          // "HH:MM"
-  stationId: z.string(),
-  guardId: z.string().nullable().optional(), // allow null to clear
-  notes: z.string().optional(),
-});
 export const GuardUpdate = z.object({
-  name: z.string().min(1).optional(),
-  dob: z.string().optional().nullable(),
-  phone: z.string().optional().nullable(),
+  name: z.string().trim().min(1).optional(),
+  dob: DobNullable.optional(),
+  phone: PhoneNullable.optional(),
 });
-export type RotationSlot = z.infer<typeof RotationSlot>;
+export type GuardUpdate = z.infer<typeof GuardUpdate>;
