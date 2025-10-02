@@ -14,6 +14,7 @@ type Assigned = Record<string, string | null>;
 type BreakState = Record<string, string>;
 type ConflictUI = { stationId: string; guardId: string; reason: string };
 type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
+const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 
 const ymdLocal = (d: Date) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // YYYY-MM-DD
@@ -63,15 +64,17 @@ useEffect(() => {
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
   // --- Derived ---
-  const usedGuardIds = useMemo(
-    () => Object.values(assigned).filter((v): v is string => Boolean(v)),
-    [assigned]
-  );
-  const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
-  const alreadyQueuedIds = useMemo(
-    () => new Set(breakQueue.map((q) => q.guardId)),
-    [breakQueue]
-  );
+const usedGuardIds = useMemo(
+  () => Object.values(assigned).filter((v): v is string => Boolean(v)).map(strip),
+  [assigned]
+);
+
+const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
+
+const alreadyQueuedIds = useMemo(
+  () => new Set(breakQueue.map((q) => strip(q.guardId))),
+  [breakQueue]
+);
   const totalQueued = useMemo(() => {
     const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
       (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
@@ -138,32 +141,42 @@ useEffect(() => {
       return next;
     });
   };
+const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
+  const keepBuckets = !!opts?.keepBuckets;
 
-  const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
-    const keepBuckets = !!opts?.keepBuckets;
+  const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
+    headers: { "x-api-key": "dev-key-123" },
+  });
+  const data = await res.json();
 
-    const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
-      headers: { "x-api-key": "dev-key-123" },
-    });
-    const data = await res.json();
-    const flat: QueueEntry[] = Array.isArray(data?.queue) ? data.queue : [];
-    setBreakQueue(flat);
+  // Normalize every row defensively
+  const flat: QueueEntry[] = Array.isArray(data?.queue)
+    ? data.queue.map((q: any) => ({
+        guardId: strip(String(q.guardId)),
+        returnTo: String(q.returnTo),
+        enteredTick:
+          typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+            ? Math.trunc(q.enteredTick)
+            : 0,
+      }))
+    : [];
 
-    if (!keepBuckets) {
-      // Seed buckets from the flat list (fallback before first rotate/autopopulate)
-      const sectionsLocal = Array.from(
-        new Set(POSITIONS.map((p) => p.id.split(".")[0]))
-      ).sort((a, b) => Number(a) - Number(b));
-      const buckets: Record<string, QueueEntry[]> = {};
-      for (const s of sectionsLocal) buckets[s] = [];
-      for (const q of flat) {
-        const sec = String(q.returnTo ?? "");
-        if (!buckets[sec]) buckets[sec] = [];
-        buckets[sec].push(q);
-      }
-      setQueuesBySection(buckets);
+  setBreakQueue(flat);
+
+  if (!keepBuckets) {
+    const sectionsLocal = Array.from(
+      new Set(POSITIONS.map((p) => p.id.split(".")[0]))
+    ).sort((a, b) => Number(a) - Number(b));
+
+    const buckets: Record<string, QueueEntry[]> = {};
+    for (const s of sectionsLocal) buckets[s] = [];
+    for (const q of flat) {
+      if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
+      buckets[q.returnTo].push(q);
     }
-  };
+    setQueuesBySection(buckets);
+  }
+};
 
   // ---------- Hydrate assigned (pre-paint) & then fetch data ----------
   useLayoutEffect(() => {

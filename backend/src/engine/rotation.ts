@@ -69,12 +69,23 @@ function nextSectionId(sec: string): string {
 function tickIndexFromISO(nowISO: string): number {
   return Math.floor(Date.parse(nowISO) / (15 * 60 * 1000)); // 15-min ticks
 }
-function minuteOfHourLocal(nowISO: string): number {
-  const d = new Date(nowISO);
-  return d.getMinutes();
+function minuteOfHourNY(nowISO: string): number {
+  try {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      minute: "2-digit",
+      hour: "numeric",
+      hour12: false,
+    });
+    const parts = fmt.formatToParts(new Date(nowISO));
+    const m = parts.find(p => p.type === "minute")?.value;
+    return m ? parseInt(m, 10) : new Date(nowISO).getMinutes();
+  } catch {
+    return new Date(nowISO).getMinutes();
+  }
 }
 function isAdultSwimFromISO(nowISO: string): boolean {
-  return minuteOfHourLocal(nowISO) === 45;
+  return minuteOfHourNY(nowISO) === 45;
 }
 
 /**

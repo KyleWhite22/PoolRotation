@@ -1,6 +1,8 @@
 import type { QueueEntry, Guard } from "../../lib/types.js";
 import { POSITIONS } from "../../../../shared/data/poolLayout.js";
 
+const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+
 export default function BreakQueue({
   queuesBySection,
   flatQueue,
@@ -17,11 +19,20 @@ export default function BreakQueue({
   onAddToSection: (sec: string) => void;
 }) {
   const sections = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort((a,b)=>Number(a)-Number(b));
-  const guardName = (id: string) => guards.find(g=>g.id===id)?.name ?? id;
+
+  const guardName = (rawId: string) => {
+    const id = strip(rawId);
+    const g = guards.find(x => strip(x.id) === id);
+    return g?.name || id; // fallback prevents UUID-looking chips when roster hasn't loaded yet
+  };
+
   const namesFor = (sec: string) => {
     const bucket = queuesBySection?.[sec];
     const raw = bucket?.length ? bucket : flatQueue.filter(q => q.returnTo === sec);
-    return raw.filter(q => !seatedSet.has(q.guardId)).map(q => guardName(q.guardId));
+    // compare with seatedSet using stripped ids
+    return raw
+      .filter(q => !seatedSet.has(strip(q.guardId)))
+      .map(q => guardName(q.guardId));
   };
 
   return (
