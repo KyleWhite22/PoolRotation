@@ -3,7 +3,6 @@ import AppShell from "../components/AppShell";
 import PoolMap from "../components/PoolMap";
 import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
-import CreateGuardModal from "../components/modals/CreateGuardModal";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
 import GuardsListModal from "../components/modals/GuardsListModal"; // <-- NEW
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
@@ -378,24 +377,6 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
  return (
   <AppShell
     title="Lifeguard Rotation Manager"
-    actions={
-      <>
-        <button
-          type="button"
-          onClick={() => setListOpen(true)}
-          className="px-3 py-1.5 rounded bg-pool-500 hover:bg-pool-400 text-sm"
-        >
-          List Guards
-        </button>
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="px-3 py-1.5 rounded bg-pool-500 hover:bg-pool-400 text-sm"
-        >
-          New Guard
-        </button>
-      </>
-    }
   >
     {/* Main layout: map left, tools/queue right on lg; stacked on mobile */}
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
@@ -449,12 +430,7 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
       </aside>
     </div>
 
-    {/* Modals */}
-    <CreateGuardModal
-      open={createOpen}
-      onClose={() => setCreateOpen(false)}
-      onCreated={fetchGuards}
-    />
+    
 
     {/* Assign directly to a seat */}
     <GuardPickerModal

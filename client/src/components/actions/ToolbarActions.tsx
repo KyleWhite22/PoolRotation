@@ -8,7 +8,6 @@ export default function ToolbarActions({
     <section className="flex flex-wrap gap-3 mb-6">
       <button onClick={onPlus15} disabled={disabled} className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400 disabled:opacity-50">+15 Minutes</button>
       <button onClick={onAuto} className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400">Autopopulate</button>
-      <button onClick={onNewGuard} className="px-4 py-2 rounded-xl2 bg-pool-500 hover:bg-pool-400">New Guard</button>
       <button onClick={onRefresh} className="px-4 py-2 rounded-xl2 bg-pool-600 hover:bg-pool-500">Refresh All</button>
       {stamp && <span className="ml-auto text-xs rounded px-2 py-1 border border-pool-600">{stamp}</span>}
     </section>
