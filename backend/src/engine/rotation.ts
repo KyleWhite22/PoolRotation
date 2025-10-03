@@ -89,10 +89,15 @@ const isEligNow = (e: QueueEntry, tick: number, seatedThisTick: Set<string>) =>
 
 /**
  * Adult-swim (:45) step:
- * - Clear seats
- * - Last seat → NEXT section with +2 ticks
- * - Others → SAME section queue (enteredTick = currentTick) in left→right order
- * - If there’s a rest chair in the section, seat the first eligible into it (<= currentTick)
+ * - Clear seats;
+ * - For each section:
+ *    • Build `arrivals` from NON-LAST seats in left→right order with enteredTick = currentTick
+ *      (these are the guards who will slide to k+1 after rest).
+ *    • If section has a rest chair:
+ *         - Pick the first **eligible** guard from the EXISTING section queue (<= currentTick)
+ *           to go on the rest chair; if none, FALL BACK to the first `arrivals` (entry seat guard).
+ *    • Rebuild the section queue as: [arrivals..., existingRemaining] so arrivals stay ahead.
+ * - LAST seat always goes to NEXT section with +2 ticks (30 min credit).
  */
 function tickAdultSwim(
   assignedBefore: Assigned,
@@ -103,41 +108,62 @@ function tickAdultSwim(
     POSITIONS.map((p) => [p.id, null as string | null])
   );
 
+  const seatedAtRest = new Set<string>();
+
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     const lastSeat = seats[seats.length - 1];
 
-    // push in L→R order so we can reconstruct “k → k+1”
+    // snapshot existing queue for this section (preserve order)
+    const existing = (qBuckets[s] ?? []).slice();
+
+    // Collect non-last seat arrivals in left→right order (entered this tick)
+    const arrivals: QueueEntry[] = [];
     for (const seat of seats) {
       const gid = assignedBefore[seat];
       if (!gid) continue;
 
       if (seat === lastSeat) {
+        // LAST → NEXT section with +2
         const nxt = nextSectionId(s);
-        qBuckets[nxt].push({ guardId: gid, returnTo: nxt, enteredTick: currentTick + 2 });
+        (qBuckets[nxt] ?? (qBuckets[nxt] = [])).push({
+          guardId: gid,
+          returnTo: nxt,
+          enteredTick: currentTick + 2,
+        });
       } else {
-        qBuckets[s].push({ guardId: gid, returnTo: s, enteredTick: currentTick });
+        // NON-LAST stays in same section
+        arrivals.push({ guardId: gid, returnTo: s, enteredTick: currentTick });
       }
     }
-  }
 
-  // seat an eligible to rest during adult (optional)
-  const seatedAtRest = new Set<string>();
-  for (const s of SECTIONS) {
+    // If this section has a rest chair, seat from EXISTING queue first; fallback to arrivals[0]
     const restSeat = restChairBySection[s];
-    if (!restSeat) continue;
+    if (restSeat) {
+      let restPick: QueueEntry | undefined;
 
-    const bucket = qBuckets[s];
-    const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick));
-    if (idx !== -1) {
-      const [entry] = bucket.splice(idx, 1);
-      nextAssigned[restSeat] = entry.guardId;
-      seatedAtRest.add(entry.guardId);
+      // pick from EXISTING queue (<= currentTick)
+      const qi = existing.findIndex((e) => e.enteredTick <= currentTick);
+      if (qi !== -1) {
+        [restPick] = existing.splice(qi, 1);
+      } else if (arrivals.length) {
+        // fallback: the guard who was at entry (index 0) goes to rest
+        restPick = arrivals.shift();
+      }
+
+      if (restPick) {
+        nextAssigned[restSeat] = restPick.guardId;
+        seatedAtRest.add(restPick.guardId);
+      }
     }
+
+    // Rebuild the section's queue so arrivals stay AHEAD of any pre-existing queue
+    qBuckets[s] = [...arrivals, ...existing];
   }
 
   return { nextAssigned, seatedAtRest };
 }
+
 
 // ---------------- core stepper ----------------
 export function computeNext({
