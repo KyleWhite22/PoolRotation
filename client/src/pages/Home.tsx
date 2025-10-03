@@ -4,7 +4,8 @@ import PoolMap from "../components/PoolMap";
 import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
-import GuardsListModal from "../components/modals/GuardsListModal"; // <-- NEW
+import GuardsListModal from "../components/modals/GuardsListModal";
+import OnDutyPanel from "../components/modals/OnDutyPanel"; // <-- NEW
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
 import type { Guard } from "../lib/types";
 
@@ -36,7 +37,7 @@ export default function Home() {
   const [pickerFor, setPickerFor] = useState<string | null>(null); // seat assignment
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
   const [createOpen, setCreateOpen] = useState(false);
-  const [listOpen, setListOpen] = useState(false); 
+  const [listOpen, setListOpen] = useState(false);
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -55,25 +56,51 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
   }, [simulatedNow]);
-useEffect(() => {
-  // eslint-disable-next-line no-console
-  console.log("queuesBySection", queuesBySection);
-}, [queuesBySection]);
+
   // All API traffic must use this key (prevents UTC day drift)
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
+  // --- On-duty selection (persisted per day) ---
+  const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(`onDuty:${dayKey}`);
+      const arr = raw ? (JSON.parse(raw) as string[]) : [];
+      return new Set(arr);
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  // re-hydrate when day changes
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`onDuty:${dayKey}`);
+      setOnDutyIds(new Set(raw ? (JSON.parse(raw) as string[]) : []));
+    } catch {
+      setOnDutyIds(new Set());
+    }
+  }, [dayKey]);
+
+  // persist changes
+  useEffect(() => {
+    try {
+      localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify([...onDutyIds]));
+    } catch {}
+  }, [onDutyIds, dayKey]);
+
   // --- Derived ---
-const usedGuardIds = useMemo(
-  () => Object.values(assigned).filter((v): v is string => Boolean(v)).map(strip),
-  [assigned]
-);
+  const usedGuardIds = useMemo(
+    () => Object.values(assigned).filter((v): v is string => Boolean(v)).map(strip),
+    [assigned]
+  );
 
-const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
+  const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
 
-const alreadyQueuedIds = useMemo(
-  () => new Set(breakQueue.map((q) => strip(q.guardId))),
-  [breakQueue]
-);
+  const alreadyQueuedIds = useMemo(
+    () => new Set(breakQueue.map((q) => strip(q.guardId))),
+    [breakQueue]
+  );
+
   const totalQueued = useMemo(() => {
     const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
       (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
@@ -86,7 +113,7 @@ const alreadyQueuedIds = useMemo(
 
   // ---------- Persistence race-guards ----------
   const assignedHydratedRef = useRef(false); // set true after we read LS on mount/day change
-  const allowPersistRef = useRef(false);     // set true *one microtask later* to avoid clobber
+  const allowPersistRef = useRef(false); // set true *one microtask later* to avoid clobber
 
   // ---------- Data funcs ----------
   const normalizeGuards = (items: any[]): Guard[] =>
@@ -140,42 +167,43 @@ const alreadyQueuedIds = useMemo(
       return next;
     });
   };
-const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
-  const keepBuckets = !!opts?.keepBuckets;
 
-  const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
-    headers: { "x-api-key": "dev-key-123" },
-  });
-  const data = await res.json();
+  const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
+    const keepBuckets = !!opts?.keepBuckets;
 
-  // Normalize every row defensively
-  const flat: QueueEntry[] = Array.isArray(data?.queue)
-    ? data.queue.map((q: any) => ({
-        guardId: strip(String(q.guardId)),
-        returnTo: String(q.returnTo),
-        enteredTick:
-          typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
-            ? Math.trunc(q.enteredTick)
-            : 0,
-      }))
-    : [];
+    const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
+      headers: { "x-api-key": "dev-key-123" },
+    });
+    const data = await res.json();
 
-  setBreakQueue(flat);
+    // Normalize every row defensively
+    const flat: QueueEntry[] = Array.isArray(data?.queue)
+      ? data.queue.map((q: any) => ({
+          guardId: strip(String(q.guardId)),
+          returnTo: String(q.returnTo),
+          enteredTick:
+            typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+              ? Math.trunc(q.enteredTick)
+              : 0,
+        }))
+      : [];
 
-  if (!keepBuckets) {
-    const sectionsLocal = Array.from(
-      new Set(POSITIONS.map((p) => p.id.split(".")[0]))
-    ).sort((a, b) => Number(a) - Number(b));
+    setBreakQueue(flat);
 
-    const buckets: Record<string, QueueEntry[]> = {};
-    for (const s of sectionsLocal) buckets[s] = [];
-    for (const q of flat) {
-      if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
-      buckets[q.returnTo].push(q);
+    if (!keepBuckets) {
+      const sectionsLocal = Array.from(
+        new Set(POSITIONS.map((p) => p.id.split(".")[0]))
+      ).sort((a, b) => Number(a) - Number(b));
+
+      const buckets: Record<string, QueueEntry[]> = {};
+      for (const s of sectionsLocal) buckets[s] = [];
+      for (const q of flat) {
+        if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
+        buckets[q.returnTo].push(q);
+      }
+      setQueuesBySection(buckets);
     }
-    setQueuesBySection(buckets);
-  }
-};
+  };
 
   // ---------- Hydrate assigned (pre-paint) & then fetch data ----------
   useLayoutEffect(() => {
@@ -188,7 +216,7 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
       try {
         const loc = JSON.parse(raw) as Assigned;
         const normalized: Assigned = Object.fromEntries(
-          POSITIONS.map((p) => [p.id, (loc && p.id in loc ? loc[p.id] : null)])
+          POSITIONS.map((p) => [p.id, loc && p.id in loc ? (loc as any)[p.id] : null])
         );
         setAssigned(normalized);
       } catch {
@@ -301,7 +329,6 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
       if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
       // refresh flat list but DO NOT overwrite buckets we just set
       await fetchQueue({ keepBuckets: true });
-  
     } catch (e) {
       console.error("Rotate failed:", e);
     } finally {
@@ -325,6 +352,7 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
     try {
       localStorage.removeItem(`breaks:${dayKey}`);
       localStorage.removeItem(`assigned:${dayKey}`); // also clear seats cache on explicit refresh
+      localStorage.removeItem(`onDuty:${dayKey}`);
     } catch {}
 
     // clear backend snapshots + breaks + queues (best-effort)
@@ -357,10 +385,20 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
 
   const autopopulate = async () => {
     try {
+      const allowedIds = [...onDutyIds];
+      if (allowedIds.length === 0) {
+        alert("Select at least one on-duty guard before Autopopulate.");
+        return;
+      }
+
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({ date: dayKey, nowISO: simulatedNow.toISOString() }),
+        body: JSON.stringify({
+          date: dayKey,
+          nowISO: simulatedNow.toISOString(),
+          allowedIds, // <-- ONLY these guards will be considered server-side
+        }),
       });
       const data = await res.json();
       if (data?.assigned) setAssigned(data.assigned);
@@ -374,101 +412,97 @@ const fetchQueue = async (opts?: { keepBuckets?: boolean }) => {
   };
 
   // -------- Render --------
- return (
-  <AppShell
-    title="Lifeguard Rotation Manager"
-  >
-    {/* Main layout: map left, tools/queue right on lg; stacked on mobile */}
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
-      {/* LEFT: Pool map */}
-      <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
-        <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
-        <PoolMap
-          className="w-full h-[70vh] lg:h-[82vh]"
-          guards={guards}
-          assigned={assigned}
-          onPick={(positionId) => setPickerFor(positionId)}
-          onClear={clearGuard}
-          conflicts={conflicts}
-        />
-      </section>
+  return (
+    <AppShell title="Lifeguard Rotation Manager">
+      {/* Main layout: map left, tools/queue right on lg; stacked on mobile */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
+        {/* LEFT: Pool map */}
+        <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
+          <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
+          <PoolMap
+            className="w-full h-[70vh] lg:h-[82vh]"
+            guards={guards}
+            assigned={assigned}
+            onPick={(positionId) => setPickerFor(positionId)}
+            onClear={clearGuard}
+            conflicts={conflicts}
+          />
+        </section>
 
-      {/* RIGHT: Sidebar — toolbar + queue (sticky on desktop) */}
-      <aside className="space-y-6 lg:sticky lg:top-4 self-start">
-        <ToolbarActions
-          onPlus15={plus15Minutes}
-          onAuto={autopopulate}
-          onNewGuard={() => setCreateOpen(true)}
-          onRefresh={handleRefreshAll}
-          disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
-          stamp={`Simulated: ${dayKey} ${simulatedNow.toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}`}
-        />
+        {/* RIGHT: Sidebar — toolbar + on-duty + queue (sticky on desktop) */}
+        <aside className="space-y-6 lg:sticky lg:top-4 self-start">
+          <ToolbarActions
+            onPlus15={plus15Minutes}
+            onAuto={autopopulate}
+            onNewGuard={() => setCreateOpen(true)}
+            onRefresh={handleRefreshAll}
+            disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
+            stamp={`Simulated: ${dayKey} ${simulatedNow.toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}`}
+          />
 
-        <BreakQueue
-          queuesBySection={queuesBySection}
-          flatQueue={breakQueue}
-          seatedSet={seatedSet}
-          guards={guards}
-          onClearAll={async () => {
-            try {
-              await fetch("/api/plan/queue-clear", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-                body: JSON.stringify({ date: dayKey }),
-              });
-              setBreakQueue([]);
-              setQueuesBySection({});
-            } catch (e) {
-              console.error("Failed to clear queues:", e);
-            }
-          }}
-          onAddToSection={(sec) => setQueuePickerFor(sec)}
-        />
-      </aside>
-    </div>
+          {/* NEW: On-duty selector */}
+          <OnDutyPanel
+            guards={guards}
+            value={onDutyIds}
+            onChange={setOnDutyIds}
+          />
 
-    
+          <BreakQueue
+            queuesBySection={queuesBySection}
+            flatQueue={breakQueue}
+            seatedSet={seatedSet}
+            guards={guards}
+            onClearAll={async () => {
+              try {
+                await fetch("/api/plan/queue-clear", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                  body: JSON.stringify({ date: dayKey }),
+                });
+                setBreakQueue([]);
+                setQueuesBySection({});
+              } catch (e) {
+                console.error("Failed to clear queues:", e);
+              }
+            }}
+            onAddToSection={(sec) => setQueuePickerFor(sec)}
+          />
+        </aside>
+      </div>
 
-    {/* Assign directly to a seat */}
-    <GuardPickerModal
-      open={pickerFor !== null}
-      onClose={() => setPickerFor(null)}
-      guards={guards}
-      alreadyAssignedIds={usedGuardIds}
-      onSelect={(guardId: string) => {
-        if (!pickerFor) return;
-        setPickerFor(null);
-        void assignGuard(pickerFor, guardId);
-      }}
-      title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
-    />
+      {/* Assign directly to a seat */}
+      <GuardPickerModal
+        open={pickerFor !== null}
+        onClose={() => setPickerFor(null)}
+        guards={guards}
+        alreadyAssignedIds={usedGuardIds}
+        onSelect={(guardId: string) => {
+          if (!pickerFor) return;
+          setPickerFor(null);
+          void assignGuard(pickerFor, guardId);
+        }}
+        title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
+      />
 
-    {/* Add directly to a section queue */}
-    <GuardPickerModal
-      open={queuePickerFor !== null}
-      onClose={() => setQueuePickerFor(null)}
-      guards={guards.filter(
-        (g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id)
-      )}
-      alreadyAssignedIds={[]}
-      onSelect={async (guardId: string) => {
-        if (!queuePickerFor) return;
-        const sec = queuePickerFor;
-        setQueuePickerFor(null);
-        await addToQueue(guardId, sec);
-      }}
-      title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
-    />
+      {/* Add directly to a section queue */}
+      <GuardPickerModal
+        open={queuePickerFor !== null}
+        onClose={() => setQueuePickerFor(null)}
+        guards={guards.filter((g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id))}
+        alreadyAssignedIds={[]}
+        onSelect={async (guardId: string) => {
+          if (!queuePickerFor) return;
+          const sec = queuePickerFor;
+          setQueuePickerFor(null);
+          await addToQueue(guardId, sec);
+        }}
+        title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
+      />
 
-  <GuardsListModal
-  open={listOpen}
-  onClose={() => setListOpen(false)}
-  guards={guards}
-/>
-  </AppShell>
-);
-
+      <GuardsListModal open={listOpen} onClose={() => setListOpen(false)} guards={guards} />
+    </AppShell>
+  );
 }
