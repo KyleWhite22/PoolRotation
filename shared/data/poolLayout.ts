@@ -30,11 +30,11 @@ export const POSITIONS: Position[] = [
   { id: "4.1", label: "MainPoolSlide", x: 95, y: 195 },
   { id: "4.2", label: "MainPoolSlide.2", x: 95, y: 230 },
 
-   { id: "5.1", label: "bigSlide1.1", x: 340, y: 120 },
-  { id: "5.2", label: "bigSlide1.2", x: 335, y: 75 },
+   //{ id: "5.1", label: "bigSlide1.1", x: 340, y: 120 },
+  //{ id: "5.2", label: "bigSlide1.2", x: 335, y: 75 },
 
-   { id: "6.1", label: "bigSlide2.1", x: 380, y: 105 },
-  { id: "6.2", label: "bigSlide2.2", x: 380, y: 70 },
+   //{ id: "6.1", label: "bigSlide2.1", x: 380, y: 105 },
+  //{ id: "6.2", label: "bigSlide2.2", x: 380, y: 70 },
 
 
 ];
@@ -47,8 +47,8 @@ export const EDGES: Edge[] = [
   { from: "3.1", to: "3.2" },
   { from: "3.2", to: "3.3" },
   { from: "4.1", to: "4.2" },
-  { from: "5.1", to: "5.2" },
-  { from: "6.1", to: "6.2" },
+  //{ from: "5.1", to: "5.2" },
+ // { from: "6.1", to: "6.2" },
 ];
 
 export const VIEWBOX = { x: 0, y: 0, width: 708, height: 429.33334 };

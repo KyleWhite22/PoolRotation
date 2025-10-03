@@ -198,6 +198,8 @@ const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sor
  * Deterministic ordering by tick then guardId.
  */// Keep the LARGEST enteredTick per guard (latest eligibility) so +2 credit survives.
 // Coerce numbers or numeric strings; fallback to currentTick only if absent/invalid.
+// Keep the LARGEST enteredTick per guard (to preserve +2),
+// BUT preserve the original array order exactly as written to DB.
 function sanitizeQueue(
   queue: any[],
   rosterIds: Set<string>,
@@ -209,7 +211,8 @@ function sanitizeQueue(
     return typeof currentTick === "number" ? currentTick : 0;
   };
 
-  const byGuard = new Map<string, { guardId: string; returnTo: string; enteredTick: number }>();
+  const out: { guardId: string; returnTo: string; enteredTick: number }[] = [];
+  const idxByGuard = new Map<string, number>();
 
   for (const raw of Array.isArray(queue) ? queue : []) {
     const gid = (() => {
@@ -222,25 +225,24 @@ function sanitizeQueue(
     if (!gid || !rosterIds.has(gid)) continue;
     if (!SECTIONS.includes(sec)) continue;
 
-    const enteredTick = coerceTick((raw as any)?.enteredTick);
+    const tick = coerceTick((raw as any)?.enteredTick);
 
-    const prev = byGuard.get(gid);
-    // IMPORTANT: keep the LARGER tick (later eligibility) so Adult-Swim +2 is not lost
-    if (!prev || enteredTick > prev.enteredTick) {
-      byGuard.set(gid, { guardId: gid, returnTo: sec, enteredTick });
-    } else if (enteredTick === prev.enteredTick) {
-      // tie-breaker: last write wins (route changes)
-      byGuard.set(gid, { guardId: gid, returnTo: sec, enteredTick });
+    if (idxByGuard.has(gid)) {
+      const i = idxByGuard.get(gid)!;
+      // Keep later eligibility but DO NOT change position
+      if (tick >= out[i].enteredTick) {
+        out[i].enteredTick = tick;
+        out[i].returnTo = sec; // last write wins on section
+      }
+    } else {
+      idxByGuard.set(gid, out.length);
+      out.push({ guardId: gid, returnTo: sec, enteredTick: tick });
     }
   }
 
-  // Stable order: by tick then guardId
-  return Array.from(byGuard.values()).sort((a, b) =>
-    a.enteredTick === b.enteredTick
-      ? a.guardId.localeCompare(b.guardId)
-      : a.enteredTick - b.enteredTick
-  );
+  return out; // no sort — preserves per-section order written by the engine
 }
+
 
 
 async function loadQueue(date: string, rosterIds: Set<string>, currentTick?: number) {
