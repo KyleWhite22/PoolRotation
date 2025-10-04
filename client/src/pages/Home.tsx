@@ -213,6 +213,9 @@ export default function Home() {
   const [createOpen, setCreateOpen] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [onDutyOpen, setOnDutyOpen] = useState(false);
+const [movingIds, setMovingIds] = useState<Set<string>>(new Set());
+const beginMove = (gid: string) => setMovingIds(s => new Set(s).add(gid));
+const endMove   = (gid: string) => setMovingIds(s => { const n = new Set(s); n.delete(gid); return n; });
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -257,6 +260,26 @@ export default function Home() {
       localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify([...onDutyIds]));
     } catch { }
   }, [onDutyIds, dayKey]);
+// Find the seat currently holding this guard (or null)
+const findSeatByGuard = (gid: string): string | null => {
+  for (const [sid, g] of Object.entries(assigned)) if (g === gid) return sid;
+  return null;
+};
+
+// Persist a single seat write
+const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
+  await fetch("/api/rotations/slot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+    body: JSON.stringify({
+      date: dayKey,
+      time: new Date().toISOString().slice(11, 16),
+      stationId: seatId,
+      guardId,
+      notes,
+    }),
+  });
+};
 
   // --- Derived ---
   const usedGuardIds = useMemo(
@@ -270,12 +293,17 @@ export default function Home() {
   );
 
   // on-duty & unassigned (not in a seat AND not in any queue)
-  const onDutyUnassigned: Guard[] = useMemo(() => {
-    const onDuty = new Set(onDutyIds);
-    return guards.filter(
-      (g) => onDuty.has(g.id) && !seatedSet.has(g.id) && !alreadyQueuedIds.has(g.id)
-    );
-  }, [guards, onDutyIds, seatedSet, alreadyQueuedIds]);
+ const onDutyUnassigned: Guard[] = useMemo(() => {
+  const onDuty = new Set(onDutyIds);
+  return guards.filter(
+    (g) =>
+      onDuty.has(g.id) &&
+      !seatedSet.has(g.id) &&
+      !alreadyQueuedIds.has(g.id) &&
+      !movingIds.has(g.id)            // ⬅️ exclude movers to avoid flicker
+  );
+}, [guards, onDutyIds, seatedSet, alreadyQueuedIds, movingIds]);
+
 
   const totalQueued = useMemo(() => {
     const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
@@ -331,6 +359,52 @@ export default function Home() {
         latestByStation.set(it.stationId, it);
       }
     }
+const findSeatByGuard = (gid: string): string | null => {
+  for (const [sid, id] of Object.entries(assigned)) if (id === gid) return sid;
+  return null;
+};
+
+// Make sure a guard appears exactly once in queuesBySection/flatQueue
+const optimisticQueueRemove = (guardId: string) => {
+  setQueuesBySection(prev => {
+    const next: Record<string, QueueEntry[]> = {};
+    for (const [sec, arr] of Object.entries(prev)) {
+      next[sec] = (arr ?? []).filter(q => q.guardId !== guardId);
+    }
+    return next;
+  });
+  setBreakQueue(prev => prev.filter(q => q.guardId !== guardId));
+};
+
+const optimisticQueueAdd = (sectionId: string, guardId: string, enteredTick: number) => {
+  const row: QueueEntry = { guardId, returnTo: sectionId, enteredTick };
+  setQueuesBySection(prev => {
+    const next = { ...prev };
+    const arr = Array.isArray(next[sectionId]) ? [...next[sectionId]] : [];
+    // remove any stale rows for this guard in any section
+    for (const s of Object.keys(next)) {
+      next[s] = (next[s] ?? []).filter(q => q.guardId !== guardId);
+    }
+    arr.push(row);
+    next[sectionId] = arr;
+    return next;
+  });
+  setBreakQueue(prev => {
+    const filtered = prev.filter(q => q.guardId !== guardId);
+    return uniqQueue([...filtered, row]);
+  });
+};
+
+const optimisticSeatClearByGuard = (guardId: string) => {
+  setAssigned(prev => {
+    let seatFound: string | null = null;
+    for (const [sid, id] of Object.entries(prev)) if (id === guardId) { seatFound = sid; break; }
+    if (!seatFound) return prev;
+    const next = { ...prev };
+    next[seatFound] = null;
+    return next;
+  });
+};
 
     setAssigned((prev) => {
       const next = { ...prev };
@@ -481,45 +555,101 @@ export default function Home() {
       console.error("Failed to add to queue:", e);
     }
   };
+// seat drop (called by PoolMap)
+// - If the guard is already seated somewhere: SWAP with destination (or just move if dest empty)
+// - If the guard is from bench/queue: place into destination (overwrites dest occupant)
+const handleSeatDrop = async (destSeatId: string, guardId: string) => {
+  // Only on-duty may be placed (optional: keep or remove this check)
+  if (!onDutyIds.has(guardId)) {
+    alert("Only on-duty guards can be seated.");
+    return;
+  }
 
+  const fromSeatId = findSeatByGuard(guardId);
+  const destOccupant = (assigned[destSeatId] ?? null) as string | null;
 
-  // seat drop (from PoolMap)
-  const handleSeatDrop = (seatId: string, guardId: string) => {
-    if (!onDutyIds.has(guardId)) {
-      alert("Only on-duty guards can be seated.");
-      return;
-    }
-    if (alreadyQueuedIds.has(guardId)) {
-      alert("This guard is in a queue—remove from queue before seating.");
-      return;
-    }
-    void assignGuard(seatId, guardId);
-  };
+  // No-op if dropping onto the same seat
+  if (fromSeatId === destSeatId) return;
 
-  // queue drop (from BreakQueue)
-  const handleQueueDrop = (sectionId: string, guardId: string) => {
-    if (!onDutyIds.has(guardId)) {
-      alert("Only on-duty guards can be queued.");
-      return;
+  if (fromSeatId) {
+    // === Seat → Seat drag ===
+    // Swap: guardId goes to dest; dest occupant moves back to fromSeat (or null if empty)
+    setAssigned((prev) => {
+      const next = { ...prev };
+      next[destSeatId] = guardId;
+      next[fromSeatId] = destOccupant; // could be null (simple move)
+      return next;
+    });
+
+    try {
+      await Promise.all([
+        persistSeat(destSeatId, guardId, "drag-seat-move"),
+        persistSeat(fromSeatId, destOccupant, "drag-seat-swap"),
+      ]);
+    } catch (e) {
+      console.error("Swap persist failed:", e);
     }
-    if (seatedSet.has(guardId)) {
-      alert("This guard is already seated.");
-      return;
-    }
-    if (alreadyQueuedIds.has(guardId)) return;
-    void addToQueue(guardId, sectionId);
-  };
+    return;
+  }
+
+  // === Bench/Queue → Seat ===
+  // Overwrite destination with guardId (evicted occupant becomes unassigned and will show on the bench)
+  setAssigned((prev) => ({ ...prev, [destSeatId]: guardId }));
+  try {
+    await persistSeat(destSeatId, guardId, "drag-seat-assign");
+  } catch (e) {
+    console.error("Assign persist failed:", e);
+  }
+};
+
+// queue drop (seat → queue OR bench → queue)
+// - If the guard is currently seated, we first clear their seat, then enqueue.
+// - If the drag came from a seat, we read the seat id from dataTransfer for speed.
+// queue drop (seat → queue OR bench → queue) with optimistic UI
+const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.DragEvent) => {
+  // Allow only on-duty in queues; auto-add if you like that behavior:
+  if (!onDutyIds.has(guardId)) {
+    setOnDutyIds(prev => new Set([...prev, guardId]));
+  }
+
+  // Already queued? bail early (UI already coherent)
+  if (alreadyQueuedIds.has(guardId)) return;
+
+  // figure out if they came from a seat
+  let seatId: string | null = null;
+  const src = e?.dataTransfer?.getData("application/x-source");
+  if (src === "seat") seatId = e?.dataTransfer?.getData("application/x-seat-id") || null;
+  if (!seatId && seatedSet.has(guardId)) seatId = findSeatByGuard(guardId);
+
+  beginMove(guardId);
+
+  // ---- OPTIMISTIC UPDATE (single render) ----
+  const enteredTick = tickIndexFromISO(simulatedNow.toISOString());
+  if (seatId) optimisticSeatClearByGuard(guardId);     // remove from seat locally
+  optimisticQueueRemove(guardId);                       // de-dupe queues
+  optimisticQueueAdd(sectionId, guardId, enteredTick);  // show in target queue immediately
+
+  // ---- Persist in background ----
+  try {
+    const tasks: Promise<any>[] = [];
+    if (seatId) tasks.push(clearGuard(seatId));                 // persist seat clear
+    tasks.push(addToQueue(guardId, sectionId));                 // persist queue add
+    await Promise.allSettled(tasks);
+
+    // Optional: reconcile with server without clobbering optimistic buckets
+    await fetchQueue({ keepBuckets: true });
+  } catch (err) {
+    console.error("queue drop failed:", err);
+    // fallback: a one-shot hard refresh of queues if something went wrong
+    await fetchQueue({ keepBuckets: false });
+  } finally {
+    endMove(guardId);
+  }
+};
 
   // --- helpers ---------------------------------------------------------------
 
-  // Find the seat currently holding this guard (if any)
-  const findSeatByGuard = (guardId: string): string | null => {
-    const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
-    for (const [seatId, gid] of Object.entries(assigned)) {
-      if (gid && strip(gid) === guardId) return seatId;
-    }
-    return null;
-  };
+
 
   // Convert a 15-min tick index back to an ISO timestamp
   const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
@@ -692,7 +822,20 @@ export default function Home() {
       console.error("Autopopulate failed:", e);
     }
   };
+const tickIndexFromISO = (iso: string) =>
+  Math.floor(Date.parse(iso) / (15 * 60 * 1000));
 
+const uniqQueue = (arr: QueueEntry[]) => {
+  const seen = new Set<string>();
+  const out: QueueEntry[] = [];
+  for (const q of arr) {
+    const key = `${q.guardId}::${q.returnTo}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  return out;
+};
   // -------- Render --------
   return (
     <AppShell title="Lifeguard Rotation Manager">
@@ -726,11 +869,11 @@ export default function Home() {
             })}`}
           />
 
-          <BreakQueue
-            queuesBySection={queuesBySection}
-            flatQueue={breakQueue}
-            seatedSet={seatedSet}
-            guards={guards}
+        <BreakQueue
+  queuesBySection={queuesBySection}
+  flatQueue={breakQueue}
+  seatedSet={seatedSet}
+  guards={guards}
             onClearAll={async () => {
               try {
                 await fetch("/api/plan/queue-clear", {
@@ -745,12 +888,15 @@ export default function Home() {
               }
             }}
             onAddToSection={(sec) => setQueuePickerFor(sec)}
-            onDropGuardToSection={(sec, e) => {
-              const gid = getDroppedGuardId(e);
-              if (!gid) return;
-              handleQueueDrop(sec, gid);
-            }}
-          />
+  onDropGuardToSection={(sec, e) => {
+    e.preventDefault();
+    const gid =
+      e.dataTransfer.getData("application/x-guard-id") ||
+      e.dataTransfer.getData("text/plain");
+    if (!gid) return;
+    void handleQueueDrop(sec, gid.trim(), e);
+  }}
+/>
         </aside>
 
         {/* RIGHT: On-duty column (button + bench drag sources & drop target) */}
