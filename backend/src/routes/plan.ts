@@ -380,6 +380,102 @@ router.post("/queue-clear", async (req, res) => {
   }));
   res.json({ ok: true, queue: [] });
 });
+// routes/plan.ts (or .js)
+// POST /api/plan/queue-set  -> replace the whole queue atomically
+// routes/plan.ts
+router.post("/queue-set", async (req, res) => {
+  const date = String(req.body?.date || "");
+  if (!date) return res.status(400).json({ error: "date required" });
+
+  const nowISO =
+    typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const currentTick = tickIndexFromISO(nowISO);
+
+  // ---------- Accept flat or bucketed payload ----------
+  type RowIn = { guardId?: any; returnTo?: any; enteredTick?: any };
+  const bodyQueue: any = req.body?.queue;
+
+  let rows: RowIn[] = [];
+  if (Array.isArray(bodyQueue)) {
+    rows = bodyQueue as RowIn[];
+  } else if (bodyQueue && typeof bodyQueue === "object") {
+    // Treat as { "1": RowIn[], "2": RowIn[] } -> flatten
+    rows = Object.entries(bodyQueue).flatMap(([sec, arr]) =>
+      Array.isArray(arr) ? arr.map((r: any) => ({ ...r, returnTo: sec })) : []
+    );
+  }
+
+  // ---------- Roster & valid sections ----------
+  const guardsScan = await ddb.send(new ScanCommand({
+    TableName: TABLE,
+    FilterExpression: "begins_with(pk, :p)",
+    ExpressionAttributeValues: { ":p": "GUARD#" },
+  }));
+  const rosterIds = new Set(
+    (guardsScan.Items ?? []).map(it =>
+      (typeof it.pk === "string" && it.pk.startsWith("GUARD#"))
+        ? it.pk.slice(6) : it.id
+    )
+  );
+  const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0])))
+    .sort((a,b) => Number(a) - Number(b));
+
+  // ---------- Helpers ----------
+  const strip = (s: any) =>
+    typeof s === "string" && s.startsWith("GUARD#") ? s.slice(6) : String(s || "");
+
+  const coerceTick = (v: any): number => {
+    if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+    if (typeof v === "string" && /^\d+$/.test(v)) return Math.trunc(parseInt(v, 10));
+    return currentTick;
+  };
+
+  // Skip seated: don't allow a guard who is in a chair to also be queued
+  const assignedLatest = await loadAssignedLatestFrame(date);
+  const seated = new Set(Object.values(assignedLatest).filter((v): v is string => Boolean(v)));
+
+  // Preserve existing eligibility ticks where possible
+  const existing = await loadQueue(date, rosterIds, currentTick);
+  const existingByGuard = new Map(existing.map(q => [q.guardId, q.enteredTick]));
+
+  // If the client (briefly) sends the same guard twice during a drag,
+  // keep the *last* occurrence (what the user intended after the drop).
+  const lastIndex = new Map<string, number>();
+  rows.forEach((r, i) => {
+    const gid = strip(r?.guardId);
+    lastIndex.set(gid, i);
+  });
+
+  const nextQueue: { guardId: string; returnTo: string; enteredTick: number }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const gid = strip(r?.guardId);
+    const sec = String(r?.returnTo || "");
+
+    if (!gid || !rosterIds.has(gid)) continue;      // unknown guard
+    if (!SECTIONS.includes(sec)) continue;          // invalid section
+    if (seated.has(gid)) continue;                  // currently seated -> skip
+    if (lastIndex.get(gid) !== i) continue;         // earlier duplicate -> skip
+
+    const preservedTick = existingByGuard.get(gid);
+    const enteredTick = preservedTick ?? coerceTick(r?.enteredTick);
+    nextQueue.push({ guardId: gid, returnTo: sec, enteredTick });
+  }
+
+  await ddb.send(new PutCommand({
+    TableName: TABLE,
+    Item: {
+      pk: `ROTATION#${date}`,
+      sk: "QUEUE",
+      type: "Queue",
+      queue: nextQueue,
+      updatedAt: nowISO,
+    },
+  }));
+
+  res.json({ ok: true, queue: nextQueue });
+});
+
 
 /**
  * POST /api/plan/autopopulate
