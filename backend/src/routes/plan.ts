@@ -397,42 +397,53 @@ router.post("/queue-clear", async (req, res) => {
 // --- POST /api/plan/autopopulate (PRESERVE EXISTING SEATS) -------------------
 // --- POST /api/plan/autopopulate (PRESERVE EXISTING SEATS) -------------------
 // routes/plan.ts
+// --- POST /api/plan/autopopulate (preserve seats & queue; append leftovers) ---
 router.post("/autopopulate", async (req, res) => {
   const date = req.body?.date;
   if (!date) return res.status(400).json({ error: "date required" });
 
-  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const nowISO =
+    typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const time = nowISO.slice(11, 19);
   const currentTick = tickIndexFromISO(nowISO);
 
-  // Roster
-  const guardsScan = await ddb.send(new ScanCommand({
-    TableName: TABLE,
-    FilterExpression: "begins_with(pk, :p)",
-    ExpressionAttributeValues: { ":p": "GUARD#" },
-  }));
-  const guards = (guardsScan.Items ?? []).map((it) => ({
-    id: typeof it.pk === "string" ? it.pk.replace(/^GUARD#/, "") : it.id,
-    name: it.name,
-    dob: it.dob,
-  }));
+  // Local helper (avoid conflicting with other strip helpers in this file)
+  const stripId = (v: any): string =>
+    typeof v === "string" && v.startsWith("GUARD#") ? v.slice(6) : String(v || "");
 
-  // Allowed (from on-duty picker)
+  // ---- Roster --------------------------------------------------------------
+  const guardsScan = await ddb.send(
+    new ScanCommand({
+      TableName: TABLE,
+      FilterExpression: "begins_with(pk, :p)",
+      ExpressionAttributeValues: { ":p": "GUARD#" },
+    })
+  );
+
+  const guards =
+    (guardsScan.Items ?? []).map((it) => ({
+      id: typeof it.pk === "string" ? it.pk.replace(/^GUARD#/, "") : it.id,
+      name: it.name,
+      dob: it.dob,
+    })) ?? [];
+
+  // Allowed (from on-duty picker). If omitted, fall back to full roster.
   let allowedIds: string[] = Array.isArray(req.body?.allowedIds)
-    ? (req.body.allowedIds as any[]).map(String)
+    ? (req.body.allowedIds as any[]).map((x) => stripId(x))
     : guards.map((g) => g.id);
 
-  // Load latest DB frame
+  // ---- Load latest DB seats + normalize client snapshot --------------------
   const dbAssigned = await loadAssignedLatestFrame(date); // { seatId: guardId|null }
 
-  // Normalize client snapshot (optional, but preferred to avoid DB race after drag)
-  const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null | undefined>;
+  const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<
+    string,
+    string | null | undefined
+  >;
+
   const clientAssigned: Record<string, string | null> = {};
   for (const p of POSITIONS) {
     const v = rawClient[p.id];
-    clientAssigned[p.id] = v
-      ? (String(v).startsWith("GUARD#") ? String(v).slice(6) : String(v))
-      : null;
+    clientAssigned[p.id] = v ? stripId(v) : null;
   }
 
   // Merge: client takes precedence when set; else DB
@@ -440,90 +451,134 @@ router.post("/autopopulate", async (req, res) => {
     POSITIONS.map((p) => [p.id, clientAssigned[p.id] ?? dbAssigned[p.id] ?? null])
   );
 
-  // Seed nextAssigned with merged (LOCKED seats)
-  const nextAssigned: Record<string, string | null> = Object.fromEntries(
-    POSITIONS.map((p) => [p.id, assignedMerged[p.id]])
+  // ---- Load existing queue (authoritative; we will APPEND to it) -----------
+  type QueueRow = { guardId: string; returnTo: string; enteredTick: number };
+
+  const queueGet = await ddb.send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: { pk: `ROTATION#${date}`, sk: "QUEUE" },
+    })
   );
 
-  const lockedGuardIds = new Set(
-    Object.values(assignedMerged).filter((v): v is string => Boolean(v))
-  );
+  const existingQueue: QueueRow[] = Array.isArray(queueGet.Item?.queue)
+    ? (queueGet.Item!.queue as any[]).map((q) => ({
+        guardId: stripId(q.guardId),
+        returnTo: String(q.returnTo),
+        enteredTick:
+          typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+            ? Math.trunc(q.enteredTick)
+            : currentTick,
+      }))
+    : [];
 
-  // Fill only empty seats left→right with allowed on-duty (excluding locked)
+  // ---- Preserve seated & queued; fill empty seats; append leftovers --------
+  const seatsSnapshot: Record<string, string | null> = { ...assignedMerged };
+
+  const seatedSet = new Set(
+    Object.values(seatsSnapshot).filter((v): v is string => Boolean(v))
+  );
+  const queuedSet = new Set(existingQueue.map((q) => q.guardId));
+
+  // Candidates to place in seats: allowed minus (already seated OR already queued)
+  const seatCandidates = allowedIds.filter((id) => !seatedSet.has(id) && !queuedSet.has(id));
+
+  // Fill empty seats left→right
   const orderedSeats = [...POSITIONS].sort((a, b) => {
     const [sa, ia] = a.id.split(".");
     const [sb, ib] = b.id.split(".");
     return sa === sb ? Number(ia) - Number(ib) : Number(sa) - Number(sb);
   });
 
-  const bench = allowedIds.filter((id) => !lockedGuardIds.has(id));
-
   for (const seat of orderedSeats) {
-    if (nextAssigned[seat.id]) continue; // preserve locked
-    const gid = bench.shift();
+    if (seatsSnapshot[seat.id]) continue; // keep existing seat
+    const gid = seatCandidates.shift();
     if (!gid) break;
-    nextAssigned[seat.id] = gid;
+    seatsSnapshot[seat.id] = gid;
+    seatedSet.add(gid);
   }
 
-  // Build queue: exactly one per section from remaining bench
-  const SECTIONS_LOCAL = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
-    (a, b) => Number(a) - Number(b)
+  // Any remaining allowedIds not seated and not already queued → append to queue
+  const remainingForQueue = allowedIds.filter(
+    (id) => !seatedSet.has(id) && !queuedSet.has(id)
   );
 
-  type QueueRow = { guardId: string; returnTo: string; enteredTick: number };
-  const queue: QueueRow[] = [];
-  let bi = 0;
-  for (const sec of SECTIONS_LOCAL) {
-    if (bi < bench.length) {
-      queue.push({ guardId: bench[bi++], returnTo: sec, enteredTick: currentTick });
-    }
+  // Distribute new queue rows round-robin by section, preserving existingQueue order
+  const SECTIONS_LOCAL = Array.from(
+    new Set(POSITIONS.map((p) => p.id.split(".")[0]))
+  ).sort((a, b) => Number(a) - Number(b));
+
+  const appended: QueueRow[] = [];
+  for (let i = 0; i < remainingForQueue.length; i++) {
+    const gid = remainingForQueue[i];
+    const sec = SECTIONS_LOCAL[i % SECTIONS_LOCAL.length];
+    appended.push({ guardId: gid, returnTo: sec, enteredTick: currentTick });
   }
 
-  // Persist breaks (empty), queue, and snapshot rows
-  await ddb.send(new PutCommand({
-    TableName: TABLE,
-    Item: { pk: `ROTATION#${date}`, sk: "BREAKS", type: "Breaks", breaks: {}, updatedAt: nowISO },
-  }));
+  const nextQueue = existingQueue.concat(appended);
 
-  await ddb.send(new PutCommand({
-    TableName: TABLE,
-    Item: { pk: `ROTATION#${date}`, sk: "QUEUE", type: "Queue", queue, updatedAt: nowISO },
-  }));
-
-  for (const [stationId, guardId] of Object.entries(nextAssigned)) {
-    await ddb.send(new PutCommand({
+  // ---- Persist seats & updated queue ---------------------------------------
+  await ddb.send(
+    new PutCommand({
       TableName: TABLE,
       Item: {
         pk: `ROTATION#${date}`,
-        sk: `SLOT#${time}#${stationId}`,
-        type: "RotationSlot",
-        stationId,
-        guardId: guardId ?? null,
-        time,
-        date,
-        notes: "autopopulate-preserve-locked",
+        sk: "BREAKS",
+        type: "Breaks",
+        breaks: {},
         updatedAt: nowISO,
       },
-    }));
+    })
+  );
+
+  for (const [stationId, guardId] of Object.entries(seatsSnapshot)) {
+    await ddb.send(
+      new PutCommand({
+        TableName: TABLE,
+        Item: {
+          pk: `ROTATION#${date}`,
+          sk: `SLOT#${time}#${stationId}`,
+          type: "RotationSlot",
+          stationId,
+          guardId: guardId ?? null,
+          time,
+          date,
+          notes: "autopopulate-append-queue",
+          updatedAt: nowISO,
+        },
+      })
+    );
   }
 
-  const queuesBySection = Object.fromEntries(SECTIONS_LOCAL.map((s) => [
-    s,
-    queue.filter((q) => q.returnTo === s),
-  ]));
+  await ddb.send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        pk: `ROTATION#${date}`,
+        sk: "QUEUE",
+        type: "Queue",
+        queue: nextQueue,
+        updatedAt: nowISO,
+      },
+    })
+  );
+
+  // ---- Response (queuesBySection for UI) -----------------------------------
+  const queuesBySection = Object.fromEntries(
+    SECTIONS_LOCAL.map((s) => [s, nextQueue.filter((q) => q.returnTo === s)])
+  );
 
   res.json({
-    assigned: nextAssigned,
+    assigned: seatsSnapshot,
     breaks: {},
     conflicts: [],
     meta: {
       period: "ALL_AGES",
-      breakQueue: queue,
+      breakQueue: nextQueue,
       queuesBySection,
     },
     nowISO,
   });
 });
-
 
 export default router;

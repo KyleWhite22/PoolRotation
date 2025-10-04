@@ -781,34 +781,42 @@ export default function Home() {
       await Promise.allSettled([fetchAssignments(), fetchQueue()]);
     }
   };
-
-  const autopopulate = async () => {
-    try {
-      const allowedIds = [...onDutyIds];
-      if (allowedIds.length === 0) {
-        alert("Select at least one on-duty guard before Autopopulate.");
-        return;
-      }
-      const res = await fetch("/api/plan/autopopulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          nowISO: simulatedNow.toISOString(),
-          allowedIds: [...onDutyIds],
-          assignedSnapshot: assigned,
-        }),
-      });
-      const data = await res.json();
-      if (data?.assigned) setAssigned(data.assigned);
-      if (data?.breaks) setBreaks(data.breaks);
-      if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
-      if (Array.isArray(data?.meta?.breakQueue)) setBreakQueue(data.meta.breakQueue);
-      if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
-    } catch (e) {
-      console.error("Autopopulate failed:", e);
+// inside Home.tsx
+const autopopulate = async () => {
+  try {
+    const allowedIds = [...onDutyIds];
+    if (allowedIds.length === 0) {
+      alert("Select at least one on-duty guard before Autopopulate.");
+      return;
     }
-  };
+
+    // 🔒 lock *all* guards currently in any queue
+    const lockedQueueIds = Array.from(
+      new Set(breakQueue.map(q => strip(q.guardId)))
+    );
+
+    const res = await fetch("/api/plan/autopopulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({
+        date: dayKey,
+        nowISO: simulatedNow.toISOString(),
+        allowedIds,
+        assignedSnapshot: assigned,      // keep existing manual seats as-is
+        lockedQueueIds,                  // 🚫 do not move these
+      }),
+    });
+
+    const data = await res.json();
+    if (data?.assigned) setAssigned(data.assigned);
+    if (data?.breaks) setBreaks(data.breaks);
+    if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+    if (Array.isArray(data?.meta?.breakQueue)) setBreakQueue(data.meta.breakQueue);
+    if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
+  } catch (e) {
+    console.error("Autopopulate failed:", e);
+  }
+};
 
   // -------- Render --------
   return (
