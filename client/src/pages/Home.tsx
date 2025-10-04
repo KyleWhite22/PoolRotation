@@ -135,7 +135,7 @@ function OnDutySelectorModal({
       </div>
     </div>
   );
-}function OnDutyBench({
+} function OnDutyBench({
   guards,
   title = "On-duty (unassigned)",
   onDropGuardToBench, // <-- NEW
@@ -255,7 +255,7 @@ export default function Home() {
   useEffect(() => {
     try {
       localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify([...onDutyIds]));
-    } catch {}
+    } catch { }
   }, [onDutyIds, dayKey]);
 
   // --- Derived ---
@@ -299,8 +299,8 @@ export default function Home() {
           typeof it.id === "string"
             ? it.id
             : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
-            ? it.pk.slice("GUARD#".length)
-            : "";
+              ? it.pk.slice("GUARD#".length)
+              : "";
         if (!id) return null;
         return { id, name: it.name ?? "", dob: it.dob ?? "" };
       })
@@ -352,13 +352,13 @@ export default function Home() {
 
     const flat: QueueEntry[] = Array.isArray(data?.queue)
       ? data.queue.map((q: any) => ({
-          guardId: strip(String(q.guardId)),
-          returnTo: String(q.returnTo),
-          enteredTick:
-            typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
-              ? Math.trunc(q.enteredTick)
-              : 0,
-        }))
+        guardId: strip(String(q.guardId)),
+        returnTo: String(q.returnTo),
+        enteredTick:
+          typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+            ? Math.trunc(q.enteredTick)
+            : 0,
+      }))
       : [];
 
     setBreakQueue(flat);
@@ -391,7 +391,7 @@ export default function Home() {
           POSITIONS.map((p) => [p.id, (loc && p.id in loc ? (loc as any)[p.id] : null)])
         );
         setAssigned(normalized);
-      } catch {}
+      } catch { }
     }
 
     assignedHydratedRef.current = true;
@@ -409,7 +409,7 @@ export default function Home() {
     if (!assignedHydratedRef.current || !allowPersistRef.current) return;
     try {
       localStorage.setItem(`assigned:${dayKey}`, JSON.stringify(assigned));
-    } catch {}
+    } catch { }
   }, [assigned, dayKey]);
 
   // -------- Helpers --------
@@ -510,87 +510,87 @@ export default function Home() {
     void addToQueue(guardId, sectionId);
   };
 
-// --- helpers ---------------------------------------------------------------
+  // --- helpers ---------------------------------------------------------------
 
-// Find the seat currently holding this guard (if any)
-const findSeatByGuard = (guardId: string): string | null => {
-  const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
-  for (const [seatId, gid] of Object.entries(assigned)) {
-    if (gid && strip(gid) === guardId) return seatId;
-  }
-  return null;
-};
+  // Find the seat currently holding this guard (if any)
+  const findSeatByGuard = (guardId: string): string | null => {
+    const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+    for (const [seatId, gid] of Object.entries(assigned)) {
+      if (gid && strip(gid) === guardId) return seatId;
+    }
+    return null;
+  };
 
-// Convert a 15-min tick index back to an ISO timestamp
-const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
+  // Convert a 15-min tick index back to an ISO timestamp
+  const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
 
-// Remove a guard from the queue (best-effort, using clear + re-add to preserve others)
-const removeFromQueueBestEffort = async (guardId: string) => {
-  // Make sure we have a fresh snapshot of the queue
-  if (!breakQueue.length) {
-    await fetchQueue(); // uses your existing fetchQueue()
-  }
+  // Remove a guard from the queue (best-effort, using clear + re-add to preserve others)
+  const removeFromQueueBestEffort = async (guardId: string) => {
+    // Make sure we have a fresh snapshot of the queue
+    if (!breakQueue.length) {
+      await fetchQueue(); // uses your existing fetchQueue()
+    }
 
-  // Strip any GUARD# prefix before comparing
-  const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+    // Strip any GUARD# prefix before comparing
+    const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 
-  const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
-  if (remaining.length === breakQueue.length) {
-    // nothing to remove
-    return;
-  }
+    const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
+    if (remaining.length === breakQueue.length) {
+      // nothing to remove
+      return;
+    }
 
-  // 1) Clear all queues for the day
-  await fetch("/api/plan/queue-clear", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-    body: JSON.stringify({ date: dayKey }),
-  });
-
-  // 2) Re-add everyone except the removed guard.
-  //    We pass a synthetic nowISO computed from the stored enteredTick
-  //    so relative ordering/eligibility is preserved.
-  for (const q of remaining) {
-    await fetch("/api/plan/queue-add", {
+    // 1) Clear all queues for the day
+    await fetch("/api/plan/queue-clear", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-      body: JSON.stringify({
-        date: dayKey,
-        guardId: q.guardId,
-        returnTo: q.returnTo,
-        nowISO: tickToISO(q.enteredTick),
-      }),
+      body: JSON.stringify({ date: dayKey }),
     });
-  }
 
-  // 3) Refresh local state
-  await fetchQueue();
-};
-
-// --- bench drop (seat/queue -> on-duty bench) ------------------------------
-
-const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
-  const dt = e.dataTransfer;
-  const source = dt.getData("application/x-source"); // "seat" | "queue" | ""
-
-  // If coming from a seat: clear that seat (use explicit seat id or find by guard)
-  if (source === "seat") {
-    const seatId =
-      dt.getData("application/x-seat-id") ||
-      findSeatByGuard(guardId);
-    if (seatId) {
-      await clearGuard(seatId); // uses your existing clearGuard()
+    // 2) Re-add everyone except the removed guard.
+    //    We pass a synthetic nowISO computed from the stored enteredTick
+    //    so relative ordering/eligibility is preserved.
+    for (const q of remaining) {
+      await fetch("/api/plan/queue-add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({
+          date: dayKey,
+          guardId: q.guardId,
+          returnTo: q.returnTo,
+          nowISO: tickToISO(q.enteredTick),
+        }),
+      });
     }
-  }
 
-  // If coming from a queue: remove from queue (best-effort + preserve others)
-  if (source === "queue") {
-    await removeFromQueueBestEffort(guardId);
-  }
+    // 3) Refresh local state
+    await fetchQueue();
+  };
 
-  // Ensure they’re marked on-duty so they appear on the bench
-  setOnDutyIds((prev) => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
-};
+  // --- bench drop (seat/queue -> on-duty bench) ------------------------------
+
+  const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
+    const dt = e.dataTransfer;
+    const source = dt.getData("application/x-source"); // "seat" | "queue" | ""
+
+    // If coming from a seat: clear that seat (use explicit seat id or find by guard)
+    if (source === "seat") {
+      const seatId =
+        dt.getData("application/x-seat-id") ||
+        findSeatByGuard(guardId);
+      if (seatId) {
+        await clearGuard(seatId); // uses your existing clearGuard()
+      }
+    }
+
+    // If coming from a queue: remove from queue (best-effort + preserve others)
+    if (source === "queue") {
+      await removeFromQueueBestEffort(guardId);
+    }
+
+    // Ensure they’re marked on-duty so they appear on the bench
+    setOnDutyIds((prev) => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
+  };
 
 
   const plus15Minutes = async () => {
@@ -636,7 +636,7 @@ const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
       localStorage.removeItem(`breaks:${dayKey}`);
       localStorage.removeItem(`assigned:${dayKey}`);
       localStorage.removeItem(`onDuty:${dayKey}`);
-    } catch {}
+    } catch { }
 
     try {
       const time = new Date().toISOString().slice(11, 16);
@@ -678,7 +678,8 @@ const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
         body: JSON.stringify({
           date: dayKey,
           nowISO: simulatedNow.toISOString(),
-          allowedIds,
+          allowedIds: [...onDutyIds],
+          assignedSnapshot: assigned, // 👈 send what’s on screen
         }),
       });
       const data = await res.json();
@@ -771,10 +772,10 @@ const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
             </div>
           </section>
 
-  <OnDutyBench
-  guards={onDutyUnassigned}
-  onDropGuardToBench={handleBenchDrop}
-/>
+          <OnDutyBench
+            guards={onDutyUnassigned}
+            onDropGuardToBench={handleBenchDrop}
+          />
 
         </aside>
       </div>
