@@ -844,48 +844,67 @@ export default function Home() {
       rotatingRef.current = false;
     }
   };
+const handleRefreshAll = async () => {
+  // 1) Reset clock back to noon (same day)
+  const reset = new Date(simulatedNow);
+  reset.setHours(12, 0, 0, 0);
+  setSimulatedNow(reset);
 
-  const handleRefreshAll = async () => {
-    const reset = new Date(simulatedNow);
-    reset.setHours(12, 0, 0, 0);
-    setSimulatedNow(reset);
+  // 2) Immediate UI reset (so things disappear right away)
+  setOnDutyOpen(false);
+  setMovingIds(new Set());
+  setOnDutyIds(new Set());                          // ← KEY FIX: clear on-duty bench state
+  setBreakQueue([]);
+  setQueuesBySection({});
+  setAssigned(Object.fromEntries(POSITIONS.map((p) => [p.id, null])));
+  setBreaks({});
+  setConflicts([]);
 
-    setBreakQueue([]);
-    setQueuesBySection({});
-    setAssigned(Object.fromEntries(POSITIONS.map((p) => [p.id, null])));
-    setBreaks({});
-    try {
-      localStorage.removeItem(`breaks:${dayKey}`);
-      localStorage.removeItem(`assigned:${dayKey}`);
-      localStorage.removeItem(`onDuty:${dayKey}`);
-    } catch {}
+  // 3) Clear local caches for THIS simulated day
+  try {
+    localStorage.removeItem(`breaks:${dayKey}`);
+    localStorage.removeItem(`assigned:${dayKey}`);
+    localStorage.removeItem(`onDuty:${dayKey}`);
+  } catch {}
 
-    try {
-      const time = new Date().toISOString().slice(11, 16);
-      await Promise.all(
-        POSITIONS.map((p) =>
-          fetch("/api/rotations/slot", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-            body: JSON.stringify({
-              date: dayKey,
-              time,
-              stationId: p.id,
-              guardId: null,
-              notes: "refresh-all",
-            }),
-          })
-        )
-      );
-      await fetch("/api/plan/queue-clear", {
+  // 4) Backend resets (best-effort)
+  try {
+    const time = new Date().toISOString().slice(11, 16);
+    await Promise.allSettled([
+      // clear every seat snapshot
+      ...POSITIONS.map((p) =>
+        fetch("/api/rotations/slot", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": "dev-key-123",
+          },
+          body: JSON.stringify({
+            date: dayKey,
+            time,
+            stationId: p.id,
+            guardId: null,
+            notes: "refresh-all",
+          }),
+        })
+      ),
+      // clear all queues for the day
+      fetch("/api/plan/queue-clear", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "dev-key-123",
+        },
         body: JSON.stringify({ date: dayKey }),
-      });
-    } catch (e) {
-      console.warn("Backend reset failed (continuing):", e);
-    }
-  };
+      }),
+    ]);
+  } catch (e) {
+    console.warn("Backend reset failed (continuing):", e);
+  } finally {
+    // 5) Pull a fresh snapshot to be safe (won’t re-add on-duty since we cleared it)
+    await Promise.allSettled([fetchAssignments(), fetchQueue()]);
+  }
+};
 
   const autopopulate = async () => {
     try {
