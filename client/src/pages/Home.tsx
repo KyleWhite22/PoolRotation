@@ -916,17 +916,39 @@ export default function Home() {
       console.error("Autopopulate failed:", e);
     }
   };
+  const [stackBelow, setStackBelow] = useState(false);
+  useEffect(() => {
+    const H_TRIGGER = 780;  // px; tweak to taste
+    const W_TRIGGER = 1400; // px; ensures 1-col on narrow laptops too
+    const recompute = () => {
+      const h = window.innerHeight || 0;
+      const w = window.innerWidth || 0;
+      setStackBelow(w < W_TRIGGER);
 
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    return () => window.removeEventListener("resize", recompute);
+  }, []);
+
+  // Convenience classes driven by stackBelow
+  const gridCls = stackBelow
+    ? "grid grid-cols-1 gap-6 items-start"
+    : "grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start";
+
+  const stickyCls = stackBelow ? "" : "lg:sticky lg:top-4";
+  const mapHeightCls = stackBelow ? "h-[72vh]" : "w-full h-[70vh] lg:h-[82vh]";
   // ---------------- Render ----------------
+ 
   return (
     <AppShell title="Lifeguard Rotation Manager">
-      {/* Desktop: Main | BreakQueue | On-Duty */}
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start">
-        {/* LEFT: Pool map (droppable seats) */}
+      {/* Layout switches between 3-col and stacked based on stackBelow */}
+      <div className={gridCls}>
+        {/* LEFT / TOP: Pool map */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
           <PoolMap
-            className="w-full h-[70vh] lg:h-[82vh]"
+            className={mapHeightCls}               // NEW: responsive height
             guards={guards}
             assigned={assigned}
             onPick={(positionId) => setPickerFor(positionId)}
@@ -936,8 +958,8 @@ export default function Home() {
           />
         </section>
 
-        {/* MIDDLE: Toolbar + Break Queue (droppable per section) */}
-        <aside className="space-y-6 lg:sticky lg:top-4 self-start">
+        {/* MIDDLE / BELOW #1: Toolbar + Break Queue */}
+        <aside className={`space-y-6 ${stickyCls} self-start`}>
           <ToolbarActions
             onPlus15={plus15Minutes}
             onAuto={autopopulate}
@@ -959,10 +981,7 @@ export default function Home() {
               try {
                 await fetch("/api/plan/queue-clear", {
                   method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "x-api-key": "dev-key-123",
-                  },
+                  headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
                   body: JSON.stringify({ date: dayKey }),
                 });
                 setBreakQueue([]);
@@ -983,15 +1002,14 @@ export default function Home() {
           />
         </aside>
 
-        {/* RIGHT: On-duty column (selector button + bench drag sources & drop target) */}
-        <aside className="space-y-4 lg:sticky lg:top-4 self-start">
+        {/* RIGHT / BELOW #2: On-duty column */}
+        <aside className={`space-y-4 ${stickyCls} self-start`}>
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="text-slate-100 font-semibold">On-Duty Controls</h3>
                 <p className="text-slate-400 text-sm">
-                  Selected:{" "}
-                  <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+                  Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
                 </p>
               </div>
               <button
@@ -1007,7 +1025,7 @@ export default function Home() {
         </aside>
       </div>
 
-      {/* Assign directly to a seat */}
+      {/* Modals (unchanged) */}
       <GuardPickerModal
         open={pickerFor !== null}
         onClose={() => setPickerFor(null)}
@@ -1021,7 +1039,6 @@ export default function Home() {
         title={pickerFor ? `Assign to ${pickerFor}` : "Assign Guard"}
       />
 
-      {/* Add directly to a section queue */}
       <GuardPickerModal
         open={queuePickerFor !== null}
         onClose={() => setQueuePickerFor(null)}
@@ -1039,7 +1056,6 @@ export default function Home() {
         title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
       />
 
-      {/* On-duty selector modal */}
       <OnDutySelectorModal
         open={onDutyOpen}
         onClose={() => setOnDutyOpen(false)}
