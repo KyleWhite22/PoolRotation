@@ -1,5 +1,5 @@
 // guardManager.tsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import AppShell from "../components/AppShell";
 
 // --- Types ---
@@ -36,40 +36,37 @@ export default function GuardsPage() {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [editGuard, setEditGuard] = useState<Guard | null>(null);
 
+  // multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [confirmBulkOpen, setConfirmBulkOpen] = useState(false);
+
   const API_HEADERS = { "x-api-key": "dev-key-123" };
 
-  // fetch + MERGE (union by id; fetched row wins)
+  // fetch (server source of truth)
   const fetchGuards = async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/guards", { headers: API_HEADERS });
       if (!res.ok) throw new Error(`GET /api/guards failed: ${res.status}`);
       const data = await res.json();
+
       const fetched: Guard[] = Array.isArray(data)
         ? data
-            .map((it: any) => {
-              const id =
+            .map((it: any) => ({
+              id:
                 typeof it.id === "string"
                   ? it.id
                   : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
-                  ? it.pk.slice("GUARD#".length)
-                  : "";
-              return {
-                id,
-                name: it.name ?? "",
-                dob: it.dob ?? "",
-                phone: it.phone ?? "",
-              } as Guard;
-            })
+                  ? it.pk.slice(6)
+                  : "",
+              name: it.name ?? "",
+              dob: it.dob ?? "",
+              phone: it.phone ?? "",
+            }))
             .filter((g: Guard) => g.id)
         : [];
 
-      setGuards(prev => {
-        const byId = new Map<string, Guard>();
-        for (const g of prev) byId.set(g.id, g);
-        for (const g of fetched) byId.set(g.id, g); // fetched overwrites prev
-        return Array.from(byId.values());
-      });
+      setGuards(fetched); // replace with the server's truth
     } catch (e) {
       console.error(e);
     } finally {
@@ -81,6 +78,16 @@ export default function GuardsPage() {
     fetchGuards();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // keep selection in sync with current guards (prune deleted / filtered-out)
+  useEffect(() => {
+    const valid = new Set(guards.map((g) => g.id));
+    setSelectedIds((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) if (valid.has(id)) next.add(id);
+      return next;
+    });
+  }, [guards]);
 
   const rows = useMemo(() => {
     const withAge = guards.map((g) => ({ ...g, age: calcAge(g.dob ?? null) }));
@@ -118,7 +125,35 @@ export default function GuardsPage() {
     return filtered;
   }, [guards, query, sortKey, sortDir]);
 
-  // delete
+  // selection helpers
+  const displayedIds = useMemo(() => rows.map((g) => g.id), [rows]);
+  const allVisibleSelected =
+    displayedIds.length > 0 && displayedIds.every((id) => selectedIds.has(id));
+  const anySelected = selectedIds.size > 0;
+
+  const toggleRow = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllVisible = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      const allSelected = displayedIds.every((id) => next.has(id));
+      if (allSelected) {
+        for (const id of displayedIds) next.delete(id);
+      } else {
+        for (const id of displayedIds) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // single delete
   const removeGuard = async (id: string) => {
     try {
       const res = await fetch(`/api/guards/${id}`, {
@@ -128,11 +163,48 @@ export default function GuardsPage() {
       if (!res.ok) throw new Error(`DELETE /api/guards/${id} failed: ${res.status}`);
       setConfirmId(null);
       // local remove for snappy UX
-      setGuards(prev => prev.filter(g => g.id !== id));
-      // background refresh (merge) in case of side-effects
+      setGuards((prev) => prev.filter((g) => g.id !== id));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      // background refresh
       fetchGuards();
     } catch (e) {
       console.error("Failed to delete guard:", e);
+    }
+  };
+
+  // bulk delete
+  const removeSelectedGuards = async () => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    setConfirmBulkOpen(false);
+
+    // optimistic local remove
+    setGuards((prev) => prev.filter((g) => !selectedIds.has(g.id)));
+    setSelectedIds(new Set());
+
+    // best-effort server delete
+    const results = await Promise.allSettled(
+      ids.map((id) =>
+        fetch(`/api/guards/${id}`, { method: "DELETE", headers: API_HEADERS })
+      )
+    );
+
+    const failures = results
+      .map((r, i) => ({ r, id: ids[i] }))
+      .filter(({ r }) => r.status === "rejected" || (r as PromiseFulfilledResult<Response>).value?.ok === false);
+
+    if (failures.length) {
+      // re-sync if something went wrong
+      console.warn("Some deletions failed:", failures);
+      await fetchGuards();
+      alert(`Failed to remove ${failures.length} guard(s). List has been refreshed.`);
+    } else {
+      // clean refresh to be safe
+      fetchGuards();
     }
   };
 
@@ -172,13 +244,23 @@ export default function GuardsPage() {
               </button>
             </div>
 
-            <div className="md:ml-auto">
+            <div className="md:ml-auto flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setCreateOpen(true)}
                 className="px-3 py-1.5 rounded bg-green-500 hover:bg-green-400 text-black font-medium text-sm"
               >
                 New Guard
+              </button>
+
+              <button
+                type="button"
+                disabled={!anySelected}
+                onClick={() => setConfirmBulkOpen(true)}
+                className="px-3 py-1.5 rounded bg-red-600/80 hover:bg-red-600 text-white font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                title={anySelected ? `Delete ${selectedIds.size} selected` : "Select rows to delete"}
+              >
+                Delete Selected {anySelected ? `(${selectedIds.size})` : ""}
               </button>
             </div>
 
@@ -187,8 +269,16 @@ export default function GuardsPage() {
 
           <div className="max-h-[70vh] overflow-auto rounded border border-slate-800">
             <table className="w-full text-sm">
-              <thead className="bg-slate-800/60 sticky top-0">
+              <thead className="bg-slate-800/60 sticky top-0 z-10">
                 <tr>
+                  <th className="p-2 w-10">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleAllVisible}
+                      aria-label="Select all visible"
+                    />
+                  </th>
                   <th className="text-left p-2 font-medium text-slate-200">Name</th>
                   <th className="text-left p-2 font-medium text-slate-200">DOB</th>
                   <th className="text-left p-2 font-medium text-slate-200">Age</th>
@@ -197,33 +287,44 @@ export default function GuardsPage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((g) => (
-                  <tr key={g.id} className="odd:bg-slate-900 even:bg-slate-900/60">
-                    <td className="p-2">{g.name || <span className="text-slate-500">—</span>}</td>
-                    <td className="p-2">{g.dob || <span className="text-slate-500">—</span>}</td>
-                    <td className="p-2">
-                      {calcAge(g.dob ?? null) ?? <span className="text-slate-500">—</span>}
-                    </td>
-                    <td className="p-2">{g.phone || <span className="text-slate-500">—</span>}</td>
-                    <td className="p-2 text-right space-x-2">
-                      <button
-                        onClick={() => setEditGuard(g)}
-                        className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white text-xs"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => setConfirmId(g.id)}
-                        className="px-2 py-1 rounded bg-red-600/80 hover:bg-red-600 text-white text-xs"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((g) => {
+                  const checked = selectedIds.has(g.id);
+                  return (
+                    <tr key={g.id} className="odd:bg-slate-900 even:bg-slate-900/60">
+                      <td className="p-2 w-10">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleRow(g.id)}
+                          aria-label={`Select ${g.name || g.id}`}
+                        />
+                      </td>
+                      <td className="p-2">{g.name || <span className="text-slate-500">—</span>}</td>
+                      <td className="p-2">{g.dob || <span className="text-slate-500">—</span>}</td>
+                      <td className="p-2">
+                        {calcAge(g.dob ?? null) ?? <span className="text-slate-500">—</span>}
+                      </td>
+                      <td className="p-2">{g.phone || <span className="text-slate-500">—</span>}</td>
+                      <td className="p-2 text-right space-x-2">
+                        <button
+                          onClick={() => setEditGuard(g)}
+                          className="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white text-xs"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => setConfirmId(g.id)}
+                          className="px-2 py-1 rounded bg-red-600/80 hover:bg-red-600 text-white text-xs"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
                 {rows.length === 0 && !loading && (
                   <tr>
-                    <td colSpan={5} className="p-4 text-center text-slate-400">
+                    <td colSpan={6} className="p-4 text-center text-slate-400">
                       No guards found.
                     </td>
                   </tr>
@@ -240,14 +341,14 @@ export default function GuardsPage() {
           onClose={() => setCreateOpen(false)}
           onCreated={(created) => {
             // optimistic insert (dedupe by id)
-            setGuards(prev => {
+            setGuards((prev) => {
               if (!created?.id) return prev;
-              const seen = new Set(prev.map(g => g.id));
+              const seen = new Set(prev.map((g) => g.id));
               if (seen.has(created.id)) return prev;
               return [created, ...prev];
             });
             setCreateOpen(false);
-            // still refresh to normalize/merge; no flicker now
+            // refresh to normalize
             fetchGuards();
           }}
         />
@@ -265,17 +366,25 @@ export default function GuardsPage() {
         />
       )}
 
-      {/* Confirm Delete */}
+      {/* Confirm Delete (single) */}
       {confirmId && (
         <ConfirmDialog
-          title={`Remove ${
-  guards.find(g => g.id === confirmId)?.name ?? "guard"
-}?`}
-             body={`This will permanently remove ${
-      guards.find(g => g.id === confirmId)?.name ?? "this guard"
-    }. `}
+          title={`Remove ${guards.find((g) => g.id === confirmId)?.name ?? "guard"}?`}
+          body={`This will permanently remove ${
+            guards.find((g) => g.id === confirmId)?.name ?? "this guard"
+          }.`}
           onCancel={() => setConfirmId(null)}
           onConfirm={() => removeGuard(confirmId)}
+        />
+      )}
+
+      {/* Confirm Delete (bulk) */}
+      {confirmBulkOpen && (
+        <ConfirmDialog
+          title={`Remove ${selectedIds.size} selected guard${selectedIds.size === 1 ? "" : "s"}?`}
+          body={`This will permanently remove ${selectedIds.size} guard${selectedIds.size === 1 ? "" : "s"}.`}
+          onCancel={() => setConfirmBulkOpen(false)}
+          onConfirm={removeSelectedGuards}
         />
       )}
     </AppShell>
@@ -306,8 +415,8 @@ function AddGuardModal({
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           name: name.trim(),
-          dob: (dob ?? "").trim() || null,      // send null when empty
-          phone: (phone ?? "").trim() || null,  // send null when empty
+          dob: (dob ?? "").trim() || null,
+          phone: (phone ?? "").trim() || null,
         }),
       });
 

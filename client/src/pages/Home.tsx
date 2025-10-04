@@ -33,26 +33,32 @@ function OnDutySelectorModal({
   onChange: (next: Set<string>) => void;
 }) {
   const [query, setQuery] = useState("");
+const norm = (s: unknown) =>
+  String(s ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip accents
+    .toLowerCase()
+    .trim();
 
   useEffect(() => {
     if (!open) setQuery("");
   }, [open]);
 
-  const sorted = useMemo(
-    () =>
-      [...guards].sort((a, b) =>
-        (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: "base" })
-      ),
-    [guards]
-  );
+ const sorted = useMemo(
+  () =>
+    [...guards].sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
+  [guards]
+);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return sorted;
-    const q = query.toLowerCase();
-    return sorted.filter(
-      (g) => g.name.toLowerCase().includes(q) || g.id.toLowerCase().includes(q)
-    );
-  }, [sorted, query]);
+  const q = norm(query);
+  if (!q) return sorted;
+  const tokens = q.split(/\s+/); // "jo smi" -> ["jo","smi"]
+  return sorted.filter((g) => {
+    const hay = norm(g.name);
+    return tokens.every((t) => hay.includes(t));
+  });
+}, [sorted, query])
 
   const toggle = (gid: string) => {
     const next = new Set(value);
@@ -97,17 +103,7 @@ function OnDutySelectorModal({
             onClick={() => onChange(new Set(filtered.map((g) => g.id)))}
             title="Select all shown"
           >
-            Select shown
-          </button>
-          <button
-            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
-            onClick={() => {
-              const ids = new Set(filtered.map((g) => g.id));
-              onChange(new Set([...value].filter((id) => !ids.has(id))));
-            }}
-            title="Clear all shown"
-          >
-            Clear shown
+            Select All
           </button>
           <button
             className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
@@ -126,7 +122,6 @@ function OnDutySelectorModal({
                 <li key={g.id} className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60">
                   <div className="min-w-0">
                     <p className="text-slate-100 truncate">{g.name || g.id}</p>
-                    <p className="text-slate-400 text-xs truncate">{g.id}</p>
                   </div>
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                     <input type="checkbox" checked={checked} onChange={() => toggle(g.id)} className="h-4 w-4 accent-slate-300" />

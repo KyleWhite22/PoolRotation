@@ -289,10 +289,11 @@ router.get("/queue", async (req, res) => {
   if (!date) return res.status(400).json({ error: "date required" });
 
   const guardsScan = await ddb.send(new ScanCommand({
-    TableName: TABLE,
-    FilterExpression: "begins_with(pk, :p)",
-    ExpressionAttributeValues: { ":p": "GUARD#" },
-  }));
+  TableName: TABLE,
+  FilterExpression: "begins_with(pk, :p)",
+  ExpressionAttributeValues: { ":p": "GUARD#" },
+  ConsistentRead: true,   // ← important
+}));
   const rosterIds = new Set(
     (guardsScan.Items ?? []).map(it =>
       (typeof it.pk === "string" && it.pk.startsWith("GUARD#"))
@@ -317,11 +318,12 @@ router.post("/queue-add", async (req, res) => {
   }
 
   // roster
-  const guardsScan = await ddb.send(new ScanCommand({
-    TableName: TABLE,
-    FilterExpression: "begins_with(pk, :p)",
-    ExpressionAttributeValues: { ":p": "GUARD#" },
-  }));
+ const guardsScan = await ddb.send(new ScanCommand({
+  TableName: TABLE,
+  FilterExpression: "begins_with(pk, :p)",
+  ExpressionAttributeValues: { ":p": "GUARD#" },
+  ConsistentRead: true,   // ← important
+}));
   const rosterIds = new Set(
     (guardsScan.Items ?? []).map(it =>
       (typeof it.pk === "string" && it.pk.startsWith("GUARD#"))
@@ -406,11 +408,12 @@ router.post("/queue-set", async (req, res) => {
   }
 
   // ---------- Roster & valid sections ----------
-  const guardsScan = await ddb.send(new ScanCommand({
-    TableName: TABLE,
-    FilterExpression: "begins_with(pk, :p)",
-    ExpressionAttributeValues: { ":p": "GUARD#" },
-  }));
+ const guardsScan = await ddb.send(new ScanCommand({
+  TableName: TABLE,
+  FilterExpression: "begins_with(pk, :p)",
+  ExpressionAttributeValues: { ":p": "GUARD#" },
+  ConsistentRead: true,   // ← important
+}));
   const rosterIds = new Set(
     (guardsScan.Items ?? []).map(it =>
       (typeof it.pk === "string" && it.pk.startsWith("GUARD#"))
@@ -508,13 +511,12 @@ router.post("/autopopulate", async (req, res) => {
     typeof v === "string" && v.startsWith("GUARD#") ? v.slice(6) : String(v || "");
 
   // ---- Roster --------------------------------------------------------------
-  const guardsScan = await ddb.send(
-    new ScanCommand({
-      TableName: TABLE,
-      FilterExpression: "begins_with(pk, :p)",
-      ExpressionAttributeValues: { ":p": "GUARD#" },
-    })
-  );
+ const guardsScan = await ddb.send(new ScanCommand({
+  TableName: TABLE,
+  FilterExpression: "begins_with(pk, :p)",
+  ExpressionAttributeValues: { ":p": "GUARD#" },
+  ConsistentRead: true,   // ← important
+}));
 
   const guards =
     (guardsScan.Items ?? []).map((it) => ({
