@@ -14,7 +14,7 @@ type MovePayload = {
 
 type ExternalDropPayload = {
   guardId: string;
-  source: "bench" | "seat" | ""; // "" when unknown
+  source: "bench" | "seat" | ""; // "" when unknown (never "queue")
   sec: string;
   index: number;
 };
@@ -25,8 +25,8 @@ export default function BreakQueue({
   seatedSet,
   guards,
   onClearAll,
-  onDropGuardToSection,   // legacy append to bucket
-  onMoveWithinQueue,      // precise reorder (queue→queue)
+  onDropGuardToSection,   // legacy append to bucket (background)
+  onMoveWithinQueue,      // queue↔queue precise reorder
   onDropExternalToQueue,  // bench/seat → queue at index
 }: {
   queuesBySection: Record<string, QueueEntry[]>;
@@ -66,59 +66,51 @@ export default function BreakQueue({
     return guardById.get(id)?.name || id;
   };
 
-  // ----- Gap (between-chips) target for precise index drops -----
-  const Gap = ({
-    sec,
-    index,
-  }: {
-    sec: string;
-    index: number; // destination index *in this bucket*
-  }) => {
-    return (
-      <span
-        // visual: a slim, invisible-ish spacer that still receives drops
-        className="inline-block w-2 h-6 align-middle"
-        onDragOver={(e) => {
-          // allow dropping here and make it look like a valid move
-          e.preventDefault();
-          e.stopPropagation();
-          e.dataTransfer.dropEffect = "move";
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
+  // Small invisible gap between chips to accept precise index drops
+  const Gap = ({ sec, index }: { sec: string; index: number }) => (
+    <span
+      className="inline-block w-2 h-6 align-middle"
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
 
-          const dt = e.dataTransfer;
-          const rawId = dt.getData("application/x-guard-id") || dt.getData("text/plain");
-          if (!rawId) return;
-          const guardId = rawId.trim();
-          const source = (dt.getData("application/x-source") || "") as "queue" | "bench" | "seat" | "";
+        const dt = e.dataTransfer;
+        const rawId = dt.getData("application/x-guard-id") || dt.getData("text/plain");
+        if (!rawId) return;
 
-          const fromSec = dt.getData("application/x-queue-section") || "";
-          const fromIndexRaw = dt.getData("application/x-queue-index");
-          const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
+        const guardId = rawId.trim();
+        const source = (dt.getData("application/x-source") || "") as
+          | "queue"
+          | "bench"
+          | "seat"
+          | "";
+        const fromSec = dt.getData("application/x-queue-section") || "";
+        const fromIndexRaw = dt.getData("application/x-queue-index");
+        const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
 
-          if (source === "queue" && fromSec) {
-            // Reorder within/between queues
-            onMoveWithinQueue?.({
-              guardId,
-              fromSec,
-              fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
-              toSec: sec,
-              toIndex: index,
-            });
-          } else {
-            // External (bench/seat) → specific index
-            onDropExternalToQueue?.(
-              { guardId, source: source === "queue" ? "" as const : source, sec, index },
-              e
-            );
-          }
-          setDragOverSec(null);
-        }}
-      />
-    );
-  };
+        if (source === "queue" && fromSec) {
+          onMoveWithinQueue?.({
+            guardId,
+            fromSec,
+            fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
+            toSec: sec,
+            toIndex: index,
+          });
+        } else {
+          onDropExternalToQueue?.(
+            { guardId, source: source === "queue" ? "" : source, sec, index },
+            e
+          );
+        }
+        setDragOverSec(null);
+      }}
+    />
+  );
 
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
@@ -141,17 +133,14 @@ export default function BreakQueue({
             <li key={sec} className="flex items-center gap-3">
               <span className="w-6 text-right font-mono text-slate-300">{sec}.</span>
 
-              {/* BUCKET */}
+              {/* Bucket background: legacy append (bench/seat only) */}
               <div
                 data-section-id={sec}
                 className={[
                   "flex-1 rounded-xl border px-2 py-2 min-h-[44px] transition-colors",
-                  active
-                    ? "border-sky-400 bg-slate-800/60"
-                    : "border-slate-700 bg-slate-800/40",
+                  active ? "border-sky-400 bg-slate-800/60" : "border-slate-700 bg-slate-800/40",
                 ].join(" ")}
                 onDragOver={(e) => {
-                  // Needed so background accepts drops (legacy append)
                   e.preventDefault();
                   e.stopPropagation();
                   e.dataTransfer.dropEffect = "move";
@@ -165,9 +154,7 @@ export default function BreakQueue({
                   }
                 }}
                 onDrop={(e) => {
-                  // Background drop = append to end (legacy).
-                  // BUT: if source is 'queue', we ignore, because
-                  // precise reorders should use gaps.
+                  // If source is queue, we ignore background drop so chips/gaps control order.
                   const src = e.dataTransfer.getData("application/x-source");
                   if (src === "queue") {
                     e.preventDefault();
@@ -175,25 +162,24 @@ export default function BreakQueue({
                     setDragOverSec(null);
                     return;
                   }
-
                   if (!onDropGuardToSection) return;
                   e.preventDefault();
                   e.stopPropagation();
-                  onDropGuardToSection(sec, e);
+                  onDropGuardToSection(sec, e); // append to end (legacy)
                   setDragOverSec(null);
                 }}
               >
                 {entries.length ? (
                   <div className="flex flex-wrap items-center gap-2">
-                    {/* Leading gap at index 0 */}
+                    {/* Leading gap (index 0) */}
                     <Gap sec={sec} index={0} />
 
-                    {entries.map((q, i) => {
+                    {entries.map((q: QueueEntry, i: number) => {
                       const gid = strip(q.guardId);
                       const label = labelFor(gid);
                       return (
                         <Fragment key={`${sec}-${i}-${gid}`}>
-                          {/* CHIP */}
+                          {/* Chip */}
                           <span
                             className="px-2 py-0.5 rounded bg-slate-900/70 border border-slate-700 text-slate-100 text-sm select-none cursor-grab active:cursor-grabbing"
                             draggable
@@ -206,14 +192,13 @@ export default function BreakQueue({
                               e.dataTransfer.setData("text/plain", gid);
                             }}
                             onDragOver={(e) => {
-                              // prevent bubbling to bucket (avoids double-handling)
+                              // Allow dropping ON the chip (treated as insert-before).
                               e.preventDefault();
                               e.stopPropagation();
                               e.dataTransfer.dropEffect = "move";
                             }}
                             onDrop={(e) => {
-                              // If someone *does* drop directly on a chip,
-                              // treat it as "insert before this chip".
+                              // Insert before this chip
                               e.preventDefault();
                               e.stopPropagation();
 
@@ -221,13 +206,13 @@ export default function BreakQueue({
                               const rawId =
                                 dt.getData("application/x-guard-id") || dt.getData("text/plain");
                               if (!rawId) return;
+
                               const guardId = rawId.trim();
                               const source = (dt.getData("application/x-source") || "") as
                                 | "queue"
                                 | "bench"
                                 | "seat"
                                 | "";
-
                               const fromSec = dt.getData("application/x-queue-section") || "";
                               const fromIndexRaw = dt.getData("application/x-queue-index");
                               const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
@@ -238,16 +223,11 @@ export default function BreakQueue({
                                   fromSec,
                                   fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
                                   toSec: sec,
-                                  toIndex: i, // insert before this chip
+                                  toIndex: i,
                                 });
                               } else {
                                 onDropExternalToQueue?.(
-                                  {
-                                    guardId,
-                                    source: source === "queue" ? "" : source,
-                                    sec,
-                                    index: i,
-                                  },
+                                  { guardId, source: source === "queue" ? "" : source, sec, index: i },
                                   e
                                 );
                               }
@@ -257,7 +237,7 @@ export default function BreakQueue({
                             {label}
                           </span>
 
-                          {/* Gap between i and i+1 maps to index i+1 */}
+                          {/* Gap after this chip => index i+1 */}
                           <Gap sec={sec} index={i + 1} />
                         </Fragment>
                       );

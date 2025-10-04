@@ -322,7 +322,7 @@ export default function Home() {
 
   const anyAssigned = useMemo(() => Object.values(assigned).some(Boolean), [assigned]);
 
-  // ---------- Persistence race-guards ----------
+  // ---------- Persistence guards ----------
   const assignedHydratedRef = useRef(false);
   const allowPersistRef = useRef(false);
 
@@ -405,53 +405,46 @@ export default function Home() {
 
       const buckets: Record<string, QueueEntry[]> = {};
       for (const s of sectionsLocal) buckets[s] = [];
-      for (const q of flat) {
+      for (const q of flat as QueueEntry[]) {
         if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
         buckets[q.returnTo].push(q);
       }
       setQueuesBySection(buckets);
     }
   };
-    const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
 
+  const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
 
   // -------------- Queue helpers / persistence --------------
-// --- helpers near your other queue helpers -------------------------------
+  const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort((a,b)=>Number(a)-Number(b));
+  const flattenBuckets = (b: Record<string, QueueEntry[]>): QueueEntry[] =>
+    SECTIONS.flatMap((sec) => (b[sec] ?? []));
 
-// sections list you already have:
-const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort((a,b)=>Number(a)-Number(b));
+  // single-write snapshot persist (NO CLEAR)
+  const persistQueueSnapshot = async (buckets: Record<string, QueueEntry[]>) => {
+    const payload = flattenBuckets(buckets).map((q: QueueEntry) => ({
+      guardId: q.guardId,
+      returnTo: q.returnTo,
+      enteredTick: q.enteredTick,
+    }));
 
-// flatten helper (keeps section order)
-const flattenBuckets = (b: Record<string, QueueEntry[]>): QueueEntry[] =>
-  SECTIONS.flatMap((sec) => (b[sec] ?? []));
+    await fetch("/api/plan/queue-set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({ date: dayKey, queue: payload }),
+    });
+  };
 
-// single-write snapshot persist (NO CLEAR)
-const persistQueueSnapshot = async (buckets: Record<string, QueueEntry[]>) => {
-  const payload = flattenBuckets(buckets).map(q => ({
-    guardId: q.guardId,
-    returnTo: q.returnTo,
-    enteredTick: q.enteredTick,
-  }));
-
-  await fetch("/api/plan/queue-set", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-    body: JSON.stringify({ date: dayKey, queue: payload }),
-  });
-};
-
-// convenience: apply buckets locally + persist atomically
-const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
-  setQueuesBySection(next);
-  setBreakQueue(flattenBuckets(next));
-  try {
-    await persistQueueSnapshot(next);
-  } catch (err) {
-    console.error("queue-set failed; refreshing", err);
-    await fetchQueue({ keepBuckets: false });
-  }
-};
-
+  const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
+    setQueuesBySection(next);
+    setBreakQueue(flattenBuckets(next));
+    try {
+      await persistQueueSnapshot(next);
+    } catch (err) {
+      console.error("queue-set failed; refreshing", err);
+      await fetchQueue({ keepBuckets: false });
+    }
+  };
 
   // ---------- Hydrate assigned & then fetch data ----------
   useLayoutEffect(() => {
@@ -487,29 +480,6 @@ const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
     } catch {}
   }, [assigned, dayKey]);
 
-  // -------- Helpers --------
-  const getDroppedGuardId = (e: DragEvent | React.DragEvent): string | null => {
-    const dt: DataTransfer | null = (e as any).dataTransfer ?? null;
-    if (!dt) return null;
-    const gid = dt.getData("application/x-guard-id") || dt.getData("text/plain");
-    return gid?.trim() || null;
-  };
-
-  const tickIndexFromISO = (iso: string) =>
-    Math.floor(Date.parse(iso) / (15 * 60 * 1000));
-
-  const uniqQueue = (arr: QueueEntry[]) => {
-    const seen = new Set<string>();
-    const out: QueueEntry[] = [];
-    for (const q of arr) {
-      const key = `${q.guardId}::${q.returnTo}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(q);
-    }
-    return out;
-  };
-
   // -------- Seat/Queue helpers --------
   const findSeatByGuard = (gid: string): string | null => {
     for (const [sid, g] of Object.entries(assigned)) if (g === gid) return sid;
@@ -529,33 +499,6 @@ const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
     });
   };
 
-  const optimisticQueueRemove = (guardId: string) => {
-    setQueuesBySection((prev) => {
-      const next: Record<string, QueueEntry[]> = {};
-      for (const [sec, arr] of Object.entries(prev)) {
-        next[sec] = (arr ?? []).filter((q) => q.guardId !== guardId);
-      }
-      return next;
-    });
-    setBreakQueue((prev) => prev.filter((q) => q.guardId !== guardId));
-  };
-
-  const optimisticQueueAdd = (sectionId: string, guardId: string, enteredTick: number) => {
-    const row: QueueEntry = { guardId, returnTo: sectionId, enteredTick };
-    setQueuesBySection((prev) => {
-      const next = { ...prev };
-      for (const s of Object.keys(next)) next[s] = (next[s] ?? []).filter((q) => q.guardId !== guardId);
-      const arr = Array.isArray(next[sectionId]) ? [...next[sectionId]] : [];
-      arr.push(row);
-      next[sectionId] = arr;
-      return next;
-    });
-    setBreakQueue((prev) => {
-      const filtered = prev.filter((q) => q.guardId !== guardId);
-      return uniqQueue([...filtered, row]);
-    });
-  };
-
   const optimisticSeatClearByGuard = (guardId: string) => {
     setAssigned((prev) => {
       let seatFound: string | null = null;
@@ -565,33 +508,6 @@ const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
       next[seatFound] = null;
       return next;
     });
-  };
-
-  const removeFromQueueBestEffort = async (guardId: string) => {
-    if (!breakQueue.length) await fetchQueue();
-    const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
-    if (remaining.length === breakQueue.length) return;
-
-    await fetch("/api/plan/queue-clear", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-      body: JSON.stringify({ date: dayKey }),
-    });
-
-    for (const q of remaining) {
-      await fetch("/api/plan/queue-add", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          guardId: q.guardId,
-          returnTo: q.returnTo,
-          nowISO: tickToISO(q.enteredTick),
-        }),
-      });
-    }
-
-    await fetchQueue();
   };
 
   // -------- Mutations --------
@@ -655,7 +571,7 @@ const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
     }
   };
 
-  // ---- Drops
+  // ---- Drops: seats ----
   const handleSeatDrop = async (destSeatId: string, guardId: string) => {
     if (!onDutyIds.has(guardId)) {
       alert("Only on-duty guards can be seated.");
@@ -693,136 +609,133 @@ const applyBucketsAndPersist = async (next: Record<string, QueueEntry[]>) => {
     }
   };
 
+  // ---- Drops: queues ----
+  // precise within/between reordering (queue → queue)
+  const handleQueueMove = ({
+    guardId, fromSec, toSec, toIndex,
+  }: { guardId: string; fromSec: string; fromIndex: number; toSec: string; toIndex: number }) => {
+    setQueuesBySection(prev => {
+      const next: Record<string, QueueEntry[]> = {};
+      for (const [sec, arr] of Object.entries(prev)) next[sec] = [...(arr ?? [])];
 
+      const src = next[fromSec] ?? [];
+      const i = src.findIndex(r => r.guardId === guardId);
+      if (i === -1) return prev;
+      const [row] = src.splice(i, 1);
 
-  // Precise queue reordering within/between sections
-// precise within/between reordering (queue → queue)
-const handleQueueMove = ({
-  guardId, fromSec, toSec, toIndex,
-}: { guardId: string; fromSec: string; fromIndex: number; toSec: string; toIndex: number }) => {
-  setQueuesBySection(prev => {
-    const next: Record<string, QueueEntry[]> = {};
-    for (const [sec, arr] of Object.entries(prev)) next[sec] = [...(arr ?? [])];
+      const dst = next[toSec] ?? [];
+      const idx = Math.max(0, Math.min(toIndex, dst.length));
+      dst.splice(idx, 0, row);
 
-    const src = next[fromSec] ?? [];
-    const i = src.findIndex(r => r.guardId === guardId);
-    if (i === -1) return prev;
-    const [row] = src.splice(i, 1);
+      // optimistic UI
+      next[fromSec] = src;
+      next[toSec] = dst;
+      setBreakQueue(flattenBuckets(next));
 
-    const dst = next[toSec] ?? [];
-    const idx = Math.max(0, Math.min(toIndex, dst.length));
-    dst.splice(idx, 0, row);
-
-    // optimistic UI
-    next[fromSec] = src;
-    next[toSec] = dst;
-    setBreakQueue(flattenBuckets(next));
-
-    // persist asynchronously
-    void persistQueueSnapshot(next).catch(async (e) => {
-      console.error("persist reorder failed", e);
-      await fetchQueue({ keepBuckets: false });
-    });
-
-    return next;
-  });
-};
-
-// bench/seat → queue at index
-const handleExternalToQueue = async (
-  { guardId, source, sec, index }: { guardId: string; source: "bench" | "seat" | ""; sec: string; index: number },
-  e: React.DragEvent
-) => {
-  const currentTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
-
-  // if from seat, optimistically clear it
-  if (source === "seat") {
-    const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
-    if (seatId) setAssigned(prev => ({ ...prev, [seatId]: null }));
-  }
-
-  setQueuesBySection(prev => {
-    const next: Record<string, QueueEntry[]> = {};
-    for (const [s, arr] of Object.entries(prev)) {
-      next[s] = (arr ?? []).filter(r => r.guardId !== guardId);
-    }
-    const row: QueueEntry = { guardId, returnTo: sec, enteredTick: currentTick };
-    const dst = next[sec] ?? [];
-    const idx = Math.max(0, Math.min(index, dst.length));
-    dst.splice(idx, 0, row);
-    next[sec] = dst;
-
-    // optimistic UI
-    setBreakQueue(flattenBuckets(next));
-
-    // persist
-    void (async () => {
-      try {
-        if (source === "seat") {
-          const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
-          if (seatId) {
-            await fetch("/api/rotations/slot", {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-              body: JSON.stringify({
-                date: dayKey,
-                time: new Date().toISOString().slice(11, 16),
-                stationId: seatId,
-                guardId: null,
-                notes: "queue-drop-from-seat",
-              }),
-            });
-          }
-        }
-        await persistQueueSnapshot(next);
-      } catch (err) {
-        console.error("persist external→queue failed", err);
+      // persist atomically
+      void persistQueueSnapshot(next).catch(async (e) => {
+        console.error("persist reorder failed", e);
         await fetchQueue({ keepBuckets: false });
-      }
-    })();
+      });
 
-    return next;
-  });
-};
+      return next;
+    });
+  };
 
-// append (legacy bucket background drop)
-const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.DragEvent) => {
-  // mark on-duty if needed
-  if (!onDutyIds.has(guardId)) setOnDutyIds(prev => new Set([...prev, guardId]));
+  // bench/seat → queue at index
+  const handleExternalToQueue = async (
+    { guardId, source, sec, index }: { guardId: string; source: "bench" | "seat" | ""; sec: string; index: number },
+    e: React.DragEvent
+  ) => {
+    const currentTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
 
-  // if already in any bucket, just ignore (use precise reorder instead)
-  if (Object.values(queuesBySection).some(arr => (arr ?? []).some(q => q.guardId === guardId))) return;
-
-  const enteredTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
-
-  const next: Record<string, QueueEntry[]> = {};
-  for (const [sec, arr] of Object.entries(queuesBySection)) next[sec] = [...(arr ?? [])];
-  (next[sectionId] ??= []).push({ guardId, returnTo: sectionId, enteredTick });
-
-  await applyBucketsAndPersist(next);
-};
-
-// queue → bench (drop on OnDutyBench)
-const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
-  const src = e.dataTransfer.getData("application/x-source");
-
-  if (src === "seat") {
-    const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
-    if (seatId) await clearGuard(seatId);
-  }
-
-  if (src === "queue") {
-    // remove from buckets and persist via queue-set (NO CLEAR)
-    const next: Record<string, QueueEntry[]> = {};
-    for (const [sec, arr] of Object.entries(queuesBySection)) {
-      next[sec] = (arr ?? []).filter(q => q.guardId !== guardId);
+    // if from seat, optimistically clear it
+    if (source === "seat") {
+      const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
+      if (seatId) setAssigned(prev => ({ ...prev, [seatId]: null }));
     }
+
+    setQueuesBySection(prev => {
+      const next: Record<string, QueueEntry[]> = {};
+      for (const [s, arr] of Object.entries(prev)) {
+        next[s] = (arr ?? []).filter(r => r.guardId !== guardId);
+      }
+      const row: QueueEntry = { guardId, returnTo: sec, enteredTick: currentTick };
+      const dst = next[sec] ?? [];
+      const idx = Math.max(0, Math.min(index, dst.length));
+      dst.splice(idx, 0, row);
+      next[sec] = dst;
+
+      // optimistic UI
+      setBreakQueue(flattenBuckets(next));
+
+      // persist atomically; also clear seat on server if needed
+      void (async () => {
+        try {
+          if (source === "seat") {
+            const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
+            if (seatId) {
+              await fetch("/api/rotations/slot", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                body: JSON.stringify({
+                  date: dayKey,
+                  time: new Date().toISOString().slice(11, 16),
+                  stationId: seatId,
+                  guardId: null,
+                  notes: "queue-drop-from-seat",
+                }),
+              });
+            }
+          }
+          await persistQueueSnapshot(next);
+        } catch (err) {
+          console.error("persist external→queue failed", err);
+          await fetchQueue({ keepBuckets: false });
+        }
+      })();
+
+      return next;
+    });
+  };
+
+  // append (legacy bucket background drop)
+  const handleQueueDrop = async (sectionId: string, guardId: string) => {
+    // mark on-duty if needed
+    if (!onDutyIds.has(guardId)) setOnDutyIds(prev => new Set([...prev, guardId]));
+
+    // if already in any bucket, ignore (use precise reorder instead)
+    if (Object.values(queuesBySection).some(arr => (arr ?? []).some((qq: QueueEntry) => qq.guardId === guardId))) return;
+
+    const enteredTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
+
+    const next: Record<string, QueueEntry[]> = {};
+    for (const [sec, arr] of Object.entries(queuesBySection)) next[sec] = [...(arr ?? [])];
+    (next[sectionId] ??= []).push({ guardId, returnTo: sectionId, enteredTick });
+
     await applyBucketsAndPersist(next);
-  }
+  };
 
-  setOnDutyIds(prev => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
-};
+  // queue → bench (drop on OnDutyBench)
+  const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
+    const src = e.dataTransfer.getData("application/x-source");
 
+    if (src === "seat") {
+      const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
+      if (seatId) await clearGuard(seatId);
+    }
+
+    if (src === "queue") {
+      // remove from buckets and persist via queue-set (NO CLEAR spam)
+      const next: Record<string, QueueEntry[]> = {};
+      for (const [sec, arr] of Object.entries(queuesBySection)) {
+        next[sec] = (arr ?? []).filter((qq: QueueEntry) => qq.guardId !== guardId);
+      }
+      await applyBucketsAndPersist(next);
+    }
+
+    setOnDutyIds(prev => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
+  };
 
   // ---- Rotate / Refresh / Autopopulate
   const plus15Minutes = async () => {
@@ -927,7 +840,7 @@ const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
       }
 
       // lock all currently queued guards (do not move)
-      const lockedQueueIds = Array.from(new Set(breakQueue.map(q => strip(q.guardId))));
+      const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => strip(q.guardId))));
 
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
@@ -1002,7 +915,7 @@ const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
                 e.dataTransfer.getData("application/x-guard-id") ||
                 e.dataTransfer.getData("text/plain");
               if (!gid) return;
-              void handleQueueDrop(sec, gid.trim(), e);
+              void handleQueueDrop(sec, gid.trim());
             }}
             // Precise within/between reordering
             onMoveWithinQueue={handleQueueMove}
