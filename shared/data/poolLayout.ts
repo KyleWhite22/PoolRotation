@@ -36,8 +36,7 @@ export const POSITIONS: Position[] = [
    { id: "6.1", label: "bigSlide2.1", x: 380, y: 105 },
   { id: "6.2", label: "bigSlide2.2", x: 380, y: 70 },
 
-  { id: "7.1", label: "bigSlide2.1", x: 380, y: 105 },
-  { id: "7.2", label: "bigSlide2.2", x: 380, y: 70 },
+  
 
 ];
 
