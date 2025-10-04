@@ -1,24 +1,85 @@
-import { useMemo, useRef, useState, useEffect, useLayoutEffect } from "react";
+import type React from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  useEffect,
+  useLayoutEffect,
+} from "react";
+
 import AppShell from "../components/AppShell";
 import PoolMap from "../components/PoolMap";
 import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
 import GuardsListModal from "../components/modals/GuardsListModal";
+
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
 import type { Guard } from "../lib/types";
 
-// -------- Local helpers / types --------
+// ---------------------------------------------------------------------------
+// Types & small helpers
+// ---------------------------------------------------------------------------
 type Assigned = Record<string, string | null>;
 type BreakState = Record<string, string>;
 type ConflictUI = { stationId: string; guardId: string; reason: string };
 type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
+
 const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 
 const ymdLocal = (d: Date) =>
-  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // YYYY-MM-DD
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+  }).format(d); // YYYY-MM-DD
 
-// ---------- On-duty modal (inline) ----------
+const tickIndexFromISO = (iso: string) =>
+  Math.floor(Date.parse(iso) / (15 * 60 * 1000)); // 15-min ticks
+
+// Merge two flat queue lists (keyed by guardId), preferring newer enteredTick.
+// On ties, remote wins (idempotent).
+const mergeQueues = (local: QueueEntry[], remote: QueueEntry[]) => {
+  const byG = new Map<string, QueueEntry>();
+
+  const add = (e: QueueEntry) => {
+    const cur: QueueEntry = {
+      guardId: strip(e.guardId),
+      returnTo: String(e.returnTo),
+      enteredTick:
+        typeof e.enteredTick === "number" && Number.isFinite(e.enteredTick)
+          ? Math.trunc(e.enteredTick)
+          : 0,
+    };
+    const prev = byG.get(cur.guardId);
+    if (!prev || cur.enteredTick > prev.enteredTick) byG.set(cur.guardId, cur);
+    else if (cur.enteredTick === prev.enteredTick) byG.set(cur.guardId, cur); // remote tie wins
+  };
+
+  local.forEach(add);
+  remote.forEach(add);
+
+  return Array.from(byG.values()).sort(
+    (a, b) =>
+      a.enteredTick - b.enteredTick ||
+      a.guardId.localeCompare(b.guardId)
+  );
+};
+
+const rebuildBuckets = (flat: QueueEntry[]) => {
+  const secs = Array.from(
+    new Set(POSITIONS.map((p) => p.id.split(".")[0]))
+  ).sort((a, b) => Number(a) - Number(b));
+
+  const buckets: Record<string, QueueEntry[]> = {};
+  for (const s of secs) buckets[s] = [];
+
+  for (const q of flat) buckets[q.returnTo].push(q);
+
+  return buckets;
+};
+
+// ---------------------------------------------------------------------------
+// On-duty modal
+// ---------------------------------------------------------------------------
 function OnDutySelectorModal({
   open,
   onClose,
@@ -41,7 +102,9 @@ function OnDutySelectorModal({
   const sorted = useMemo(
     () =>
       [...guards].sort((a, b) =>
-        (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: "base" })
+        (a.name || a.id).localeCompare(b.name || b.id, undefined, {
+          sensitivity: "base",
+        })
       ),
     [guards]
   );
@@ -63,15 +126,25 @@ function OnDutySelectorModal({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      onKeyDown={(e) => e.key === "Escape" && onClose()}
+    >
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div className="relative w-[min(720px,95vw)] max-h-[85vh] overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-xl">
         <header className="p-4 border-b border-slate-700 flex items-center gap-3">
           <h3 className="text-slate-100 font-semibold">Select On-Duty Guards</h3>
           <span className="ml-auto text-slate-400 text-sm">
-            Selected: <span className="text-slate-200 font-medium">{value.size}</span> / {guards.length}
+            Selected:{" "}
+            <span className="text-slate-200 font-medium">{value.size}</span> /{" "}
+            {guards.length}
           </span>
-          <button className="ml-3 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm" onClick={onClose}>
+          <button
+            className="ml-3 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+            onClick={onClose}
+          >
             Done
           </button>
         </header>
@@ -115,30 +188,47 @@ function OnDutySelectorModal({
             {filtered.map((g) => {
               const checked = value.has(g.id);
               return (
-                <li key={g.id} className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60">
+                <li
+                  key={g.id}
+                  className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60"
+                >
                   <div className="min-w-0">
                     <p className="text-slate-100 truncate">{g.name || g.id}</p>
                     <p className="text-slate-400 text-xs truncate">{g.id}</p>
                   </div>
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                    <input type="checkbox" checked={checked} onChange={() => toggle(g.id)} className="h-4 w-4 accent-slate-300" />
-                    <span className="text-slate-300 text-sm">{checked ? "On duty" : "Off"}</span>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(g.id)}
+                      className="h-4 w-4 accent-slate-300"
+                    />
+                    <span className="text-slate-300 text-sm">
+                      {checked ? "On duty" : "Off"}
+                    </span>
                   </label>
                 </li>
               );
             })}
             {!filtered.length && (
-              <li className="px-4 py-6 text-center text-slate-400 text-sm">No guards match your search.</li>
+              <li className="px-4 py-6 text-center text-slate-400 text-sm">
+                No guards match your search.
+              </li>
             )}
           </ul>
         </div>
       </div>
     </div>
   );
-} function OnDutyBench({
+}
+
+// ---------------------------------------------------------------------------
+// On-duty bench (drag sources + drop target)
+// ---------------------------------------------------------------------------
+function OnDutyBench({
   guards,
   title = "On-duty (unassigned)",
-  onDropGuardToBench, // <-- NEW
+  onDropGuardToBench,
 }: {
   guards: Guard[];
   title?: string;
@@ -147,7 +237,6 @@ function OnDutySelectorModal({
   return (
     <section
       className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md"
-      // enable dropping anywhere on the bench
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => {
         e.preventDefault();
@@ -164,7 +253,9 @@ function OnDutySelectorModal({
 
       <div className="p-3">
         {guards.length === 0 ? (
-          <p className="text-sm text-slate-400 px-1 py-2">No on-duty guards waiting.</p>
+          <p className="text-sm text-slate-400 px-1 py-2">
+            No on-duty guards waiting.
+          </p>
         ) : (
           <ul className="flex flex-wrap gap-2">
             {guards.map((g) => (
@@ -185,37 +276,53 @@ function OnDutySelectorModal({
             ))}
           </ul>
         )}
-        <p className="mt-2 text-xs text-slate-500">Drag a chip to a seat or a section queue. Drop here to unseat/unqueue.</p>
+        <p className="mt-2 text-xs text-slate-500">
+          Drag a chip to a seat or a section queue. Drop here to unseat/unqueue.
+        </p>
       </div>
     </section>
   );
 }
 
-
-
+// ---------------------------------------------------------------------------
+// Home
+// ---------------------------------------------------------------------------
 export default function Home() {
-  // --- Server data ---
+  // ---------------- Server data ----------------
   const [guards, setGuards] = useState<Guard[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // --- Rotation state ---
+  // ---------------- Rotation state ----------------
   const [assigned, setAssigned] = useState<Assigned>(() =>
     Object.fromEntries(POSITIONS.map((p) => [p.id, null]))
   );
   const [breaks, setBreaks] = useState<BreakState>({});
   const [conflicts, setConflicts] = useState<ConflictUI[]>([]);
   const [breakQueue, setBreakQueue] = useState<QueueEntry[]>([]);
-  const [queuesBySection, setQueuesBySection] = useState<Record<string, QueueEntry[]>>({});
+  const [queuesBySection, setQueuesBySection] = useState<
+    Record<string, QueueEntry[]>
+  >({});
 
-  // --- UI state ---
+  // ---------------- UI state ----------------
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [onDutyOpen, setOnDutyOpen] = useState(false);
-const [movingIds, setMovingIds] = useState<Set<string>>(new Set());
-const beginMove = (gid: string) => setMovingIds(s => new Set(s).add(gid));
-const endMove   = (gid: string) => setMovingIds(s => { const n = new Set(s); n.delete(gid); return n; });
+
+  // Used to hide flicker during cross-surface moves
+  const [movingIds, setMovingIds] = useState<Set<string>>(new Set());
+  const beginMove = (gid: string) => setMovingIds((s) => new Set(s).add(gid));
+  const endMove = (gid: string) =>
+    setMovingIds((s) => {
+      const n = new Set(s);
+      n.delete(gid);
+      return n;
+    });
+
+  // Queue “epoch” to guard against stale fetch overwrites
+  const queueEpochRef = useRef(0);
+  const bumpQueueEpoch = () => ++queueEpochRef.current;
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -237,7 +344,7 @@ const endMove   = (gid: string) => setMovingIds(s => { const n = new Set(s); n.d
 
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
-  // --- On-duty selection (persisted per day) ---
+  // ---------------- On-duty selection (persisted per day) ----------------
   const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem(`onDuty:${dayKey}`);
@@ -247,6 +354,7 @@ const endMove   = (gid: string) => setMovingIds(s => { const n = new Set(s); n.d
       return new Set<string>();
     }
   });
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(`onDuty:${dayKey}`);
@@ -255,55 +363,42 @@ const endMove   = (gid: string) => setMovingIds(s => { const n = new Set(s); n.d
       setOnDutyIds(new Set());
     }
   }, [dayKey]);
+
   useEffect(() => {
     try {
       localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify([...onDutyIds]));
-    } catch { }
+    } catch {}
   }, [onDutyIds, dayKey]);
-// Find the seat currently holding this guard (or null)
-const findSeatByGuard = (gid: string): string | null => {
-  for (const [sid, g] of Object.entries(assigned)) if (g === gid) return sid;
-  return null;
-};
 
-// Persist a single seat write
-const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
-  await fetch("/api/rotations/slot", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-    body: JSON.stringify({
-      date: dayKey,
-      time: new Date().toISOString().slice(11, 16),
-      stationId: seatId,
-      guardId,
-      notes,
-    }),
-  });
-};
-
-  // --- Derived ---
+  // ---------------- Derived ----------------
   const usedGuardIds = useMemo(
     () => Object.values(assigned).filter((v): v is string => Boolean(v)).map(strip),
     [assigned]
   );
+
   const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
-  const alreadyQueuedIds = useMemo(
-    () => new Set(breakQueue.map((q) => strip(q.guardId))),
-    [breakQueue]
-  );
 
-  // on-duty & unassigned (not in a seat AND not in any queue)
- const onDutyUnassigned: Guard[] = useMemo(() => {
-  const onDuty = new Set(onDutyIds);
-  return guards.filter(
-    (g) =>
-      onDuty.has(g.id) &&
-      !seatedSet.has(g.id) &&
-      !alreadyQueuedIds.has(g.id) &&
-      !movingIds.has(g.id)            // ⬅️ exclude movers to avoid flicker
-  );
-}, [guards, onDutyIds, seatedSet, alreadyQueuedIds, movingIds]);
+  // Prefer buckets for already-queued detection to avoid flicker during optimistic updates
+  const alreadyQueuedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const arr of Object.values(queuesBySection ?? {})) {
+      for (const q of arr ?? []) ids.add(strip(q.guardId));
+    }
+    if (ids.size === 0) for (const q of breakQueue) ids.add(strip(q.guardId));
+    return ids;
+  }, [queuesBySection, breakQueue]);
 
+  // On-duty + unassigned (not in a seat or queue) and not currently moving
+  const onDutyUnassigned: Guard[] = useMemo(() => {
+    const onDuty = new Set(onDutyIds);
+    return guards.filter(
+      (g) =>
+        onDuty.has(g.id) &&
+        !seatedSet.has(g.id) &&
+        !alreadyQueuedIds.has(g.id) &&
+        !movingIds.has(g.id)
+    );
+  }, [guards, onDutyIds, seatedSet, alreadyQueuedIds, movingIds]);
 
   const totalQueued = useMemo(() => {
     const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
@@ -315,11 +410,11 @@ const persistSeat = async (seatId: string, guardId: string | null, notes: string
 
   const anyAssigned = useMemo(() => Object.values(assigned).some(Boolean), [assigned]);
 
-  // ---------- Persistence race-guards ----------
+  // ---------------- Persistence guards ----------------
   const assignedHydratedRef = useRef(false);
   const allowPersistRef = useRef(false);
 
-  // ---------- Data funcs ----------
+  // ---------------- Data funcs ----------------
   const normalizeGuards = (items: any[]): Guard[] =>
     items
       .map((it) => {
@@ -327,8 +422,8 @@ const persistSeat = async (seatId: string, guardId: string | null, notes: string
           typeof it.id === "string"
             ? it.id
             : typeof it.pk === "string" && it.pk.startsWith("GUARD#")
-              ? it.pk.slice("GUARD#".length)
-              : "";
+            ? it.pk.slice("GUARD#".length)
+            : "";
         if (!id) return null;
         return { id, name: it.name ?? "", dob: it.dob ?? "" };
       })
@@ -337,7 +432,9 @@ const persistSeat = async (seatId: string, guardId: string | null, notes: string
   const fetchGuards = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/guards", { headers: { "x-api-key": "dev-key-123" } });
+      const res = await fetch("/api/guards", {
+        headers: { "x-api-key": "dev-key-123" },
+      });
       const data = await res.json();
       setGuards(Array.isArray(data) ? normalizeGuards(data) : []);
     } finally {
@@ -352,6 +449,7 @@ const persistSeat = async (seatId: string, guardId: string | null, notes: string
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
       await res.json();
 
+    // Keep latest row per station
     const latestByStation = new Map<string, (typeof items)[number]>();
     for (const it of items) {
       const prev = latestByStation.get(it.stationId);
@@ -359,52 +457,6 @@ const persistSeat = async (seatId: string, guardId: string | null, notes: string
         latestByStation.set(it.stationId, it);
       }
     }
-const findSeatByGuard = (gid: string): string | null => {
-  for (const [sid, id] of Object.entries(assigned)) if (id === gid) return sid;
-  return null;
-};
-
-// Make sure a guard appears exactly once in queuesBySection/flatQueue
-const optimisticQueueRemove = (guardId: string) => {
-  setQueuesBySection(prev => {
-    const next: Record<string, QueueEntry[]> = {};
-    for (const [sec, arr] of Object.entries(prev)) {
-      next[sec] = (arr ?? []).filter(q => q.guardId !== guardId);
-    }
-    return next;
-  });
-  setBreakQueue(prev => prev.filter(q => q.guardId !== guardId));
-};
-
-const optimisticQueueAdd = (sectionId: string, guardId: string, enteredTick: number) => {
-  const row: QueueEntry = { guardId, returnTo: sectionId, enteredTick };
-  setQueuesBySection(prev => {
-    const next = { ...prev };
-    const arr = Array.isArray(next[sectionId]) ? [...next[sectionId]] : [];
-    // remove any stale rows for this guard in any section
-    for (const s of Object.keys(next)) {
-      next[s] = (next[s] ?? []).filter(q => q.guardId !== guardId);
-    }
-    arr.push(row);
-    next[sectionId] = arr;
-    return next;
-  });
-  setBreakQueue(prev => {
-    const filtered = prev.filter(q => q.guardId !== guardId);
-    return uniqQueue([...filtered, row]);
-  });
-};
-
-const optimisticSeatClearByGuard = (guardId: string) => {
-  setAssigned(prev => {
-    let seatFound: string | null = null;
-    for (const [sid, id] of Object.entries(prev)) if (id === guardId) { seatFound = sid; break; }
-    if (!seatFound) return prev;
-    const next = { ...prev };
-    next[seatFound] = null;
-    return next;
-  });
-};
 
     setAssigned((prev) => {
       const next = { ...prev };
@@ -426,33 +478,20 @@ const optimisticSeatClearByGuard = (guardId: string) => {
 
     const flat: QueueEntry[] = Array.isArray(data?.queue)
       ? data.queue.map((q: any) => ({
-        guardId: strip(String(q.guardId)),
-        returnTo: String(q.returnTo),
-        enteredTick:
-          typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
-            ? Math.trunc(q.enteredTick)
-            : 0,
-      }))
+          guardId: strip(String(q.guardId)),
+          returnTo: String(q.returnTo),
+          enteredTick:
+            typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+              ? Math.trunc(q.enteredTick)
+              : 0,
+        }))
       : [];
 
     setBreakQueue(flat);
-
-    if (!keepBuckets) {
-      const sectionsLocal = Array.from(
-        new Set(POSITIONS.map((p) => p.id.split(".")[0]))
-      ).sort((a, b) => Number(a) - Number(b));
-
-      const buckets: Record<string, QueueEntry[]> = {};
-      for (const s of sectionsLocal) buckets[s] = [];
-      for (const q of flat) {
-        if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
-        buckets[q.returnTo].push(q);
-      }
-      setQueuesBySection(buckets);
-    }
+    if (!keepBuckets) setQueuesBySection(rebuildBuckets(flat));
   };
 
-  // ---------- Hydrate assigned & then fetch data ----------
+  // ---------------- Hydrate assigned & then fetch data ----------------
   useLayoutEffect(() => {
     assignedHydratedRef.current = false;
     allowPersistRef.current = false;
@@ -465,7 +504,7 @@ const optimisticSeatClearByGuard = (guardId: string) => {
           POSITIONS.map((p) => [p.id, (loc && p.id in loc ? (loc as any)[p.id] : null)])
         );
         setAssigned(normalized);
-      } catch { }
+      } catch {}
     }
 
     assignedHydratedRef.current = true;
@@ -483,36 +522,94 @@ const optimisticSeatClearByGuard = (guardId: string) => {
     if (!assignedHydratedRef.current || !allowPersistRef.current) return;
     try {
       localStorage.setItem(`assigned:${dayKey}`, JSON.stringify(assigned));
-    } catch { }
+    } catch {}
   }, [assigned, dayKey]);
 
-  // -------- Helpers --------
-  const getDroppedGuardId = (e: DragEvent | React.DragEvent): string | null => {
-    const dt: DataTransfer | null = (e as any).dataTransfer ?? null;
-    if (!dt) return null;
-    const gid = dt.getData("application/x-guard-id") || dt.getData("text/plain");
-    return gid?.trim() || null;
+  // ---------------- Basic helpers ----------------
+  const findSeatByGuard = (gid: string): string | null => {
+    for (const [sid, g] of Object.entries(assigned)) if (g === gid) return sid;
+    return null;
   };
 
+  const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
+    await fetch("/api/rotations/slot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({
+        date: dayKey,
+        time: new Date().toISOString().slice(11, 16),
+        stationId: seatId,
+        guardId,
+        notes,
+      }),
+    });
+  };
 
-  // -------- Mutations --------
+  // ---------------- Optimistic queue helpers ----------------
+  const optimisticQueueRemoveEverywhere = (guardId: string) => {
+    setQueuesBySection((prev) => {
+      const next: Record<string, QueueEntry[]> = {};
+      for (const [sec, arr] of Object.entries(prev)) {
+        next[sec] = (arr ?? []).filter((q) => strip(q.guardId) !== guardId);
+      }
+      return next;
+    });
+    setBreakQueue((prev) => prev.filter((q) => strip(q.guardId) !== guardId));
+  };
+
+  const optimisticQueueAddToSection = (
+    sectionId: string,
+    guardId: string,
+    enteredTick: number
+  ) => {
+    const row: QueueEntry = { guardId, returnTo: sectionId, enteredTick };
+
+    setQueuesBySection((prev) => {
+      const next = { ...prev };
+      for (const s of Object.keys(next)) {
+        next[s] = (next[s] ?? []).filter((q) => strip(q.guardId) !== guardId);
+      }
+      next[sectionId] = [...(next[sectionId] ?? []), row];
+      return next;
+    });
+
+    setBreakQueue((prev) => {
+      const withOut = prev.filter((q) => strip(q.guardId) !== guardId);
+      return [...withOut, row];
+    });
+  };
+
+  const reconcileQueueFromServer = (
+    serverFlat: QueueEntry[],
+    epochAtCall: number
+  ) => {
+    if (epochAtCall !== queueEpochRef.current) return; // stale fetch: ignore
+
+    // Local flat from buckets (preferred) or flatQueue
+    const localFlat: QueueEntry[] = [];
+    const anyBuckets = Object.values(queuesBySection ?? {}).some(
+      (a) => (a?.length ?? 0) > 0
+    );
+    if (anyBuckets) {
+      for (const arr of Object.values(queuesBySection)) localFlat.push(...(arr ?? []));
+    } else {
+      localFlat.push(...breakQueue);
+    }
+
+    const merged = mergeQueues(localFlat, serverFlat);
+    setBreakQueue(merged);
+    setQueuesBySection(rebuildBuckets(merged));
+  };
+
+  // ---------------- Mutations: seats & queues ----------------
   const assignGuard = async (positionId: string, guardId: string) => {
+    // prevent duplicate seating of the same guard
     const seatedIds = new Set(Object.values(assigned).filter(Boolean) as string[]);
     if (seatedIds.has(guardId)) return;
 
     setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
     try {
-      await fetch("/api/rotations/slot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          time: new Date().toISOString().slice(11, 16),
-          stationId: positionId,
-          guardId,
-          notes: "drag-drop-assign",
-        }),
-      });
+      await persistSeat(positionId, guardId, "drag-drop-assign");
     } catch (err) {
       console.error("Failed to persist assignment:", err);
     }
@@ -521,17 +618,7 @@ const optimisticSeatClearByGuard = (guardId: string) => {
   const clearGuard = async (positionId: string) => {
     setAssigned((prev) => ({ ...prev, [positionId]: null }));
     try {
-      await fetch("/api/rotations/slot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          time: new Date().toISOString().slice(11, 16),
-          stationId: positionId,
-          guardId: null,
-          notes: "clear-seat",
-        }),
-      });
+      await persistSeat(positionId, null, "clear-seat");
     } catch (e) {
       console.error("Failed to clear slot:", e);
     }
@@ -550,136 +637,146 @@ const optimisticSeatClearByGuard = (guardId: string) => {
           notes: "drag-drop-queue",
         }),
       });
-      await fetchQueue();
+      // DO NOT immediately overwrite optimistic state here; caller handles reconcile.
     } catch (e) {
       console.error("Failed to add to queue:", e);
     }
   };
-// seat drop (called by PoolMap)
-// - If the guard is already seated somewhere: SWAP with destination (or just move if dest empty)
-// - If the guard is from bench/queue: place into destination (overwrites dest occupant)
-const handleSeatDrop = async (destSeatId: string, guardId: string) => {
-  // Only on-duty may be placed (optional: keep or remove this check)
-  if (!onDutyIds.has(guardId)) {
-    alert("Only on-duty guards can be seated.");
-    return;
-  }
 
-  const fromSeatId = findSeatByGuard(guardId);
-  const destOccupant = (assigned[destSeatId] ?? null) as string | null;
-
-  // No-op if dropping onto the same seat
-  if (fromSeatId === destSeatId) return;
-
-  if (fromSeatId) {
-    // === Seat → Seat drag ===
-    // Swap: guardId goes to dest; dest occupant moves back to fromSeat (or null if empty)
-    setAssigned((prev) => {
-      const next = { ...prev };
-      next[destSeatId] = guardId;
-      next[fromSeatId] = destOccupant; // could be null (simple move)
-      return next;
-    });
-
-    try {
-      await Promise.all([
-        persistSeat(destSeatId, guardId, "drag-seat-move"),
-        persistSeat(fromSeatId, destOccupant, "drag-seat-swap"),
-      ]);
-    } catch (e) {
-      console.error("Swap persist failed:", e);
-    }
-    return;
-  }
-
-  // === Bench/Queue → Seat ===
-  // Overwrite destination with guardId (evicted occupant becomes unassigned and will show on the bench)
-  setAssigned((prev) => ({ ...prev, [destSeatId]: guardId }));
-  try {
-    await persistSeat(destSeatId, guardId, "drag-seat-assign");
-  } catch (e) {
-    console.error("Assign persist failed:", e);
-  }
-};
-
-// queue drop (seat → queue OR bench → queue)
-// - If the guard is currently seated, we first clear their seat, then enqueue.
-// - If the drag came from a seat, we read the seat id from dataTransfer for speed.
-// queue drop (seat → queue OR bench → queue) with optimistic UI
-const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.DragEvent) => {
-  // Allow only on-duty in queues; auto-add if you like that behavior:
-  if (!onDutyIds.has(guardId)) {
-    setOnDutyIds(prev => new Set([...prev, guardId]));
-  }
-
-  // Already queued? bail early (UI already coherent)
-  if (alreadyQueuedIds.has(guardId)) return;
-
-  // figure out if they came from a seat
-  let seatId: string | null = null;
-  const src = e?.dataTransfer?.getData("application/x-source");
-  if (src === "seat") seatId = e?.dataTransfer?.getData("application/x-seat-id") || null;
-  if (!seatId && seatedSet.has(guardId)) seatId = findSeatByGuard(guardId);
-
-  beginMove(guardId);
-
-  // ---- OPTIMISTIC UPDATE (single render) ----
-  const enteredTick = tickIndexFromISO(simulatedNow.toISOString());
-  if (seatId) optimisticSeatClearByGuard(guardId);     // remove from seat locally
-  optimisticQueueRemove(guardId);                       // de-dupe queues
-  optimisticQueueAdd(sectionId, guardId, enteredTick);  // show in target queue immediately
-
-  // ---- Persist in background ----
-  try {
-    const tasks: Promise<any>[] = [];
-    if (seatId) tasks.push(clearGuard(seatId));                 // persist seat clear
-    tasks.push(addToQueue(guardId, sectionId));                 // persist queue add
-    await Promise.allSettled(tasks);
-
-    // Optional: reconcile with server without clobbering optimistic buckets
-    await fetchQueue({ keepBuckets: true });
-  } catch (err) {
-    console.error("queue drop failed:", err);
-    // fallback: a one-shot hard refresh of queues if something went wrong
-    await fetchQueue({ keepBuckets: false });
-  } finally {
-    endMove(guardId);
-  }
-};
-
-  // --- helpers ---------------------------------------------------------------
-
-
-
-  // Convert a 15-min tick index back to an ISO timestamp
-  const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
-
-  // Remove a guard from the queue (best-effort, using clear + re-add to preserve others)
-  const removeFromQueueBestEffort = async (guardId: string) => {
-    // Make sure we have a fresh snapshot of the queue
-    if (!breakQueue.length) {
-      await fetchQueue(); // uses your existing fetchQueue()
-    }
-
-    // Strip any GUARD# prefix before comparing
-    const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
-
-    const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
-    if (remaining.length === breakQueue.length) {
-      // nothing to remove
+  // Seat drop: supports seat→seat swap, bench/queue→seat assign
+  const handleSeatDrop = async (destSeatId: string, guardId: string) => {
+    if (!onDutyIds.has(guardId)) {
+      alert("Only on-duty guards can be seated.");
       return;
     }
 
-    // 1) Clear all queues for the day
+    const fromSeatId = findSeatByGuard(guardId);
+    const destOccupant = (assigned[destSeatId] ?? null) as string | null;
+
+    if (fromSeatId === destSeatId) return; // no-op
+
+    if (fromSeatId) {
+      // seat → seat (swap/move)
+      setAssigned((prev) => {
+        const next = { ...prev };
+        next[destSeatId] = guardId;
+        next[fromSeatId] = destOccupant; // null = simple move
+        return next;
+      });
+
+      try {
+        await Promise.all([
+          persistSeat(destSeatId, guardId, "drag-seat-move"),
+          persistSeat(fromSeatId, destOccupant, "drag-seat-swap"),
+        ]);
+      } catch (e) {
+        console.error("Swap persist failed:", e);
+      }
+      return;
+    }
+
+    // bench/queue → seat (overwrite dest)
+    setAssigned((prev) => ({ ...prev, [destSeatId]: guardId }));
+    try {
+      await persistSeat(destSeatId, guardId, "drag-seat-assign");
+    } catch (e) {
+      console.error("Assign persist failed:", e);
+    }
+  };
+
+  // Queue drop (seat→queue OR bench→queue) with robust optimistic flow + reconcile
+  const handleQueueDrop = async (
+    sectionId: string,
+    guardId: string,
+    e?: React.DragEvent
+  ) => {
+    if (!onDutyIds.has(guardId)) {
+      setOnDutyIds((prev) => new Set([...prev, guardId])); // optional policy
+    }
+
+    // If already queued to this section, ignore
+    if (
+      alreadyQueuedIds.has(guardId) &&
+      breakQueue.some(
+        (q) => strip(q.guardId) === guardId && q.returnTo === sectionId
+      )
+    ) {
+      return;
+    }
+
+    const epoch = bumpQueueEpoch();
+    const enteredTick = tickIndexFromISO(simulatedNow.toISOString());
+
+    // Did it come from a seat?
+    let seatIdFromDrag =
+      e?.dataTransfer?.getData("application/x-seat-id") || null;
+    if (!seatIdFromDrag && seatedSet.has(guardId)) {
+      seatIdFromDrag = findSeatByGuard(guardId);
+    }
+
+    beginMove(guardId);
+
+    // OPTIMISTIC
+    if (seatIdFromDrag) {
+      setAssigned((prev) => ({ ...prev, [seatIdFromDrag!]: null }));
+    }
+    optimisticQueueRemoveEverywhere(guardId);
+    optimisticQueueAddToSection(sectionId, guardId, enteredTick);
+
+    // PERSIST + RECONCILE
+    try {
+      const ops: Promise<any>[] = [];
+      if (seatIdFromDrag) {
+        ops.push(
+          persistSeat(seatIdFromDrag, null, "seat->queue")
+        );
+      }
+      ops.push(addToQueue(guardId, sectionId));
+      await Promise.allSettled(ops);
+
+      // Fetch server queue and reconcile (epoch-gated)
+      const r = await fetch(`/api/plan/queue?date=${dayKey}`, {
+        headers: { "x-api-key": "dev-key-123" },
+      });
+      const data = await r.json();
+      const serverFlat: QueueEntry[] = Array.isArray(data?.queue)
+        ? data.queue.map((q: any) => ({
+            guardId: strip(String(q.guardId)),
+            returnTo: String(q.returnTo),
+            enteredTick:
+              typeof q.enteredTick === "number" && Number.isFinite(q.enteredTick)
+                ? Math.trunc(q.enteredTick)
+                : 0,
+          }))
+        : [];
+
+      reconcileQueueFromServer(serverFlat, epoch);
+    } catch (err) {
+      console.error("queue drop persist/reconcile failed", err);
+      // last resort: refetch fresh, still via normal fetchQueue
+      await fetchQueue({ keepBuckets: false });
+    } finally {
+      endMove(guardId);
+    }
+  };
+
+  // ---------------- Bench drop (seat/queue -> on-duty bench) ----------------
+  // Removes from seat or queue (best-effort) and ensures they're in on-duty set
+  const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
+
+  const removeFromQueueBestEffort = async (guardId: string) => {
+    if (!breakQueue.length) {
+      await fetchQueue();
+    }
+    const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
+    if (remaining.length === breakQueue.length) return;
+
     await fetch("/api/plan/queue-clear", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({ date: dayKey }),
     });
 
-    // 2) Re-add everyone except the removed guard.
-    //    We pass a synthetic nowISO computed from the stored enteredTick
-    //    so relative ordering/eligibility is preserved.
     for (const q of remaining) {
       await fetch("/api/plan/queue-add", {
         method: "POST",
@@ -693,36 +790,29 @@ const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.Dra
       });
     }
 
-    // 3) Refresh local state
     await fetchQueue();
   };
 
-  // --- bench drop (seat/queue -> on-duty bench) ------------------------------
-
   const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
     const dt = e.dataTransfer;
-    const source = dt.getData("application/x-source"); // "seat" | "queue" | ""
+    const source = dt.getData("application/x-source"); // "seat" | "queue" | "bench"
 
-    // If coming from a seat: clear that seat (use explicit seat id or find by guard)
     if (source === "seat") {
       const seatId =
-        dt.getData("application/x-seat-id") ||
-        findSeatByGuard(guardId);
-      if (seatId) {
-        await clearGuard(seatId); // uses your existing clearGuard()
-      }
+        dt.getData("application/x-seat-id") || findSeatByGuard(guardId);
+      if (seatId) await clearGuard(seatId);
     }
 
-    // If coming from a queue: remove from queue (best-effort + preserve others)
     if (source === "queue") {
       await removeFromQueueBestEffort(guardId);
     }
 
-    // Ensure they’re marked on-duty so they appear on the bench
-    setOnDutyIds((prev) => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
+    setOnDutyIds((prev) =>
+      prev.has(guardId) ? prev : new Set([...prev, guardId])
+    );
   };
 
-
+  // ---------------- Time-step & other actions ----------------
   const plus15Minutes = async () => {
     if (rotatingRef.current) return;
     rotatingRef.current = true;
@@ -745,6 +835,8 @@ const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.Dra
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
       if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
+
+      // keepBuckets so optimistic state isn't clobbered if mid-drag
       await fetchQueue({ keepBuckets: true });
     } catch (e) {
       console.error("Rotate failed:", e);
@@ -766,7 +858,7 @@ const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.Dra
       localStorage.removeItem(`breaks:${dayKey}`);
       localStorage.removeItem(`assigned:${dayKey}`);
       localStorage.removeItem(`onDuty:${dayKey}`);
-    } catch { }
+    } catch {}
 
     try {
       const time = new Date().toISOString().slice(11, 16);
@@ -802,16 +894,18 @@ const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.Dra
         alert("Select at least one on-duty guard before Autopopulate.");
         return;
       }
+
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
           nowISO: simulatedNow.toISOString(),
-          allowedIds: [...onDutyIds],
-          assignedSnapshot: assigned, // 👈 send what’s on screen
+          allowedIds,
+          assignedSnapshot: assigned, // keeps dragged seats locked-in
         }),
       });
+
       const data = await res.json();
       if (data?.assigned) setAssigned(data.assigned);
       if (data?.breaks) setBreaks(data.breaks);
@@ -822,26 +916,13 @@ const handleQueueDrop = async (sectionId: string, guardId: string, e?: React.Dra
       console.error("Autopopulate failed:", e);
     }
   };
-const tickIndexFromISO = (iso: string) =>
-  Math.floor(Date.parse(iso) / (15 * 60 * 1000));
 
-const uniqQueue = (arr: QueueEntry[]) => {
-  const seen = new Set<string>();
-  const out: QueueEntry[] = [];
-  for (const q of arr) {
-    const key = `${q.guardId}::${q.returnTo}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(q);
-  }
-  return out;
-};
-  // -------- Render --------
+  // ---------------- Render ----------------
   return (
     <AppShell title="Lifeguard Rotation Manager">
-      {/* Desktop: 3 columns — Main | BreakQueue | On-Duty column */}
+      {/* Desktop: Main | BreakQueue | On-Duty */}
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start">
-        {/* LEFT: Pool map */}
+        {/* LEFT: Pool map (droppable seats) */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
           <PoolMap
@@ -855,7 +936,7 @@ const uniqQueue = (arr: QueueEntry[]) => {
           />
         </section>
 
-        {/* MIDDLE: Toolbar + Break Queue */}
+        {/* MIDDLE: Toolbar + Break Queue (droppable per section) */}
         <aside className="space-y-6 lg:sticky lg:top-4 self-start">
           <ToolbarActions
             onPlus15={plus15Minutes}
@@ -869,16 +950,19 @@ const uniqQueue = (arr: QueueEntry[]) => {
             })}`}
           />
 
-        <BreakQueue
-  queuesBySection={queuesBySection}
-  flatQueue={breakQueue}
-  seatedSet={seatedSet}
-  guards={guards}
+          <BreakQueue
+            queuesBySection={queuesBySection}
+            flatQueue={breakQueue}
+            seatedSet={seatedSet}
+            guards={guards}
             onClearAll={async () => {
               try {
                 await fetch("/api/plan/queue-clear", {
                   method: "POST",
-                  headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-api-key": "dev-key-123",
+                  },
                   body: JSON.stringify({ date: dayKey }),
                 });
                 setBreakQueue([]);
@@ -888,25 +972,26 @@ const uniqQueue = (arr: QueueEntry[]) => {
               }
             }}
             onAddToSection={(sec) => setQueuePickerFor(sec)}
-  onDropGuardToSection={(sec, e) => {
-    e.preventDefault();
-    const gid =
-      e.dataTransfer.getData("application/x-guard-id") ||
-      e.dataTransfer.getData("text/plain");
-    if (!gid) return;
-    void handleQueueDrop(sec, gid.trim(), e);
-  }}
-/>
+            onDropGuardToSection={(sec, e) => {
+              e.preventDefault();
+              const gid =
+                e.dataTransfer.getData("application/x-guard-id") ||
+                e.dataTransfer.getData("text/plain");
+              if (!gid) return;
+              void handleQueueDrop(sec, gid.trim(), e);
+            }}
+          />
         </aside>
 
-        {/* RIGHT: On-duty column (button + bench drag sources & drop target) */}
+        {/* RIGHT: On-duty column (selector button + bench drag sources & drop target) */}
         <aside className="space-y-4 lg:sticky lg:top-4 self-start">
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="text-slate-100 font-semibold">On-Duty Controls</h3>
                 <p className="text-slate-400 text-sm">
-                  Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+                  Selected:{" "}
+                  <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
                 </p>
               </div>
               <button
@@ -918,11 +1003,7 @@ const uniqQueue = (arr: QueueEntry[]) => {
             </div>
           </section>
 
-          <OnDutyBench
-            guards={onDutyUnassigned}
-            onDropGuardToBench={handleBenchDrop}
-          />
-
+          <OnDutyBench guards={onDutyUnassigned} onDropGuardToBench={handleBenchDrop} />
         </aside>
       </div>
 
@@ -944,13 +1025,16 @@ const uniqQueue = (arr: QueueEntry[]) => {
       <GuardPickerModal
         open={queuePickerFor !== null}
         onClose={() => setQueuePickerFor(null)}
-        guards={guards.filter((g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id))}
+        guards={guards.filter(
+          (g) => !usedGuardIds.includes(g.id) && !alreadyQueuedIds.has(g.id)
+        )}
         alreadyAssignedIds={[]}
         onSelect={async (guardId: string) => {
           if (!queuePickerFor) return;
           const sec = queuePickerFor;
           setQueuePickerFor(null);
           await addToQueue(guardId, sec);
+          await fetchQueue({ keepBuckets: true });
         }}
         title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
       />
