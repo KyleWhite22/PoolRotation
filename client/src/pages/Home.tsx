@@ -5,7 +5,6 @@ import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
 import GuardsListModal from "../components/modals/GuardsListModal";
-import OnDutyPanel from "../components/modals/OnDutyPanel"; // <-- NEW
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
 import type { Guard } from "../lib/types";
 
@@ -18,6 +17,181 @@ const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 
 const ymdLocal = (d: Date) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // YYYY-MM-DD
+
+// ---------- On-duty modal (inline) ----------
+function OnDutySelectorModal({
+  open,
+  onClose,
+  guards,
+  value,
+  onChange,
+}: {
+  open: boolean;
+  onClose: () => void;
+  guards: Guard[];
+  value: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  const sorted = useMemo(
+    () =>
+      [...guards].sort((a, b) =>
+        (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: "base" })
+      ),
+    [guards]
+  );
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return sorted;
+    const q = query.toLowerCase();
+    return sorted.filter(
+      (g) => g.name.toLowerCase().includes(q) || g.id.toLowerCase().includes(q)
+    );
+  }, [sorted, query]);
+
+  const toggle = (gid: string) => {
+    const next = new Set(value);
+    next.has(gid) ? next.delete(gid) : next.add(gid);
+    onChange(next);
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" role="dialog" aria-modal="true" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative w-[min(720px,95vw)] max-h-[85vh] overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-xl">
+        <header className="p-4 border-b border-slate-700 flex items-center gap-3">
+          <h3 className="text-slate-100 font-semibold">Select On-Duty Guards</h3>
+          <span className="ml-auto text-slate-400 text-sm">
+            Selected: <span className="text-slate-200 font-medium">{value.size}</span> / {guards.length}
+          </span>
+          <button className="ml-3 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm" onClick={onClose}>
+            Done
+          </button>
+        </header>
+
+        <div className="p-4 border-b border-slate-700 flex items-center gap-2">
+          <input
+            type="text"
+            placeholder="Search guards…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="flex-1 rounded-lg bg-slate-800/80 border border-slate-700 px-3 py-2 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-500"
+          />
+          <button
+            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+            onClick={() => onChange(new Set(filtered.map((g) => g.id)))}
+            title="Select all shown"
+          >
+            Select shown
+          </button>
+          <button
+            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+            onClick={() => {
+              const ids = new Set(filtered.map((g) => g.id));
+              onChange(new Set([...value].filter((id) => !ids.has(id))));
+            }}
+            title="Clear all shown"
+          >
+            Clear shown
+          </button>
+          <button
+            className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+            onClick={() => onChange(new Set())}
+            title="Clear all"
+          >
+            Clear all
+          </button>
+        </div>
+
+        <div className="overflow-auto max-h-[60vh]">
+          <ul className="divide-y divide-slate-800">
+            {filtered.map((g) => {
+              const checked = value.has(g.id);
+              return (
+                <li key={g.id} className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60">
+                  <div className="min-w-0">
+                    <p className="text-slate-100 truncate">{g.name || g.id}</p>
+                    <p className="text-slate-400 text-xs truncate">{g.id}</p>
+                  </div>
+                  <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+                    <input type="checkbox" checked={checked} onChange={() => toggle(g.id)} className="h-4 w-4 accent-slate-300" />
+                    <span className="text-slate-300 text-sm">{checked ? "On duty" : "Off"}</span>
+                  </label>
+                </li>
+              );
+            })}
+            {!filtered.length && (
+              <li className="px-4 py-6 text-center text-slate-400 text-sm">No guards match your search.</li>
+            )}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}function OnDutyBench({
+  guards,
+  title = "On-duty (unassigned)",
+  onDropGuardToBench, // <-- NEW
+}: {
+  guards: Guard[];
+  title?: string;
+  onDropGuardToBench: (guardId: string, e: React.DragEvent) => void;
+}) {
+  return (
+    <section
+      className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md"
+      // enable dropping anywhere on the bench
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => {
+        e.preventDefault();
+        const gid =
+          e.dataTransfer.getData("application/x-guard-id") ||
+          e.dataTransfer.getData("text/plain");
+        if (gid) onDropGuardToBench(gid.trim(), e);
+      }}
+    >
+      <header className="p-4 border-b border-slate-700 flex items-center justify-between">
+        <h3 className="text-slate-100 font-semibold">{title}</h3>
+        <span className="text-xs text-slate-400">{guards.length}</span>
+      </header>
+
+      <div className="p-3">
+        {guards.length === 0 ? (
+          <p className="text-sm text-slate-400 px-1 py-2">No on-duty guards waiting.</p>
+        ) : (
+          <ul className="flex flex-wrap gap-2">
+            {guards.map((g) => (
+              <li
+                key={g.id}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData("application/x-guard-id", g.id);
+                  e.dataTransfer.setData("text/plain", g.id);
+                  e.dataTransfer.setData("application/x-source", "bench");
+                }}
+                className="select-none cursor-grab active:cursor-grabbing px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-100 text-sm shadow-sm"
+                title={`Drag ${g.name || g.id} onto a seat or a queue`}
+                data-guard-id={g.id}
+              >
+                <span className="font-medium">{g.name || g.id}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mt-2 text-xs text-slate-500">Drag a chip to a seat or a section queue. Drop here to unseat/unqueue.</p>
+      </div>
+    </section>
+  );
+}
+
+
 
 export default function Home() {
   // --- Server data ---
@@ -34,10 +208,11 @@ export default function Home() {
   const [queuesBySection, setQueuesBySection] = useState<Record<string, QueueEntry[]>>({});
 
   // --- UI state ---
-  const [pickerFor, setPickerFor] = useState<string | null>(null); // seat assignment
-  const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null); // section queue add
+  const [pickerFor, setPickerFor] = useState<string | null>(null);
+  const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [listOpen, setListOpen] = useState(false);
+  const [onDutyOpen, setOnDutyOpen] = useState(false);
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -57,7 +232,6 @@ export default function Home() {
     localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
   }, [simulatedNow]);
 
-  // All API traffic must use this key (prevents UTC day drift)
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
   // --- On-duty selection (persisted per day) ---
@@ -70,8 +244,6 @@ export default function Home() {
       return new Set<string>();
     }
   });
-
-  // re-hydrate when day changes
   useEffect(() => {
     try {
       const raw = localStorage.getItem(`onDuty:${dayKey}`);
@@ -80,8 +252,6 @@ export default function Home() {
       setOnDutyIds(new Set());
     }
   }, [dayKey]);
-
-  // persist changes
   useEffect(() => {
     try {
       localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify([...onDutyIds]));
@@ -93,13 +263,19 @@ export default function Home() {
     () => Object.values(assigned).filter((v): v is string => Boolean(v)).map(strip),
     [assigned]
   );
-
   const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
-
   const alreadyQueuedIds = useMemo(
     () => new Set(breakQueue.map((q) => strip(q.guardId))),
     [breakQueue]
   );
+
+  // on-duty & unassigned (not in a seat AND not in any queue)
+  const onDutyUnassigned: Guard[] = useMemo(() => {
+    const onDuty = new Set(onDutyIds);
+    return guards.filter(
+      (g) => onDuty.has(g.id) && !seatedSet.has(g.id) && !alreadyQueuedIds.has(g.id)
+    );
+  }, [guards, onDutyIds, seatedSet, alreadyQueuedIds]);
 
   const totalQueued = useMemo(() => {
     const bucketTotals = Object.values(queuesBySection ?? {}).reduce(
@@ -112,8 +288,8 @@ export default function Home() {
   const anyAssigned = useMemo(() => Object.values(assigned).some(Boolean), [assigned]);
 
   // ---------- Persistence race-guards ----------
-  const assignedHydratedRef = useRef(false); // set true after we read LS on mount/day change
-  const allowPersistRef = useRef(false); // set true *one microtask later* to avoid clobber
+  const assignedHydratedRef = useRef(false);
+  const allowPersistRef = useRef(false);
 
   // ---------- Data funcs ----------
   const normalizeGuards = (items: any[]): Guard[] =>
@@ -148,7 +324,6 @@ export default function Home() {
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
       await res.json();
 
-    // Keep latest row per station
     const latestByStation = new Map<string, (typeof items)[number]>();
     for (const it of items) {
       const prev = latestByStation.get(it.stationId);
@@ -157,7 +332,6 @@ export default function Home() {
       }
     }
 
-    // **Merge non-null only** so we never clear a locally assigned seat with nulls from server.
     setAssigned((prev) => {
       const next = { ...prev };
       for (const p of POSITIONS) {
@@ -176,7 +350,6 @@ export default function Home() {
     });
     const data = await res.json();
 
-    // Normalize every row defensively
     const flat: QueueEntry[] = Array.isArray(data?.queue)
       ? data.queue.map((q: any) => ({
           guardId: strip(String(q.guardId)),
@@ -205,39 +378,33 @@ export default function Home() {
     }
   };
 
-  // ---------- Hydrate assigned (pre-paint) & then fetch data ----------
+  // ---------- Hydrate assigned & then fetch data ----------
   useLayoutEffect(() => {
     assignedHydratedRef.current = false;
     allowPersistRef.current = false;
 
-    // 1) Hydrate from localStorage synchronously
     const raw = localStorage.getItem(`assigned:${dayKey}`);
     if (raw) {
       try {
         const loc = JSON.parse(raw) as Assigned;
         const normalized: Assigned = Object.fromEntries(
-          POSITIONS.map((p) => [p.id, loc && p.id in loc ? (loc as any)[p.id] : null])
+          POSITIONS.map((p) => [p.id, (loc && p.id in loc ? (loc as any)[p.id] : null)])
         );
         setAssigned(normalized);
-      } catch {
-        // ignore parse error; keep current assigned
-      }
+      } catch {}
     }
 
-    // 2) Mark hydration done, allow persist on next microtask (after React applies setState)
     assignedHydratedRef.current = true;
     queueMicrotask(() => {
       allowPersistRef.current = true;
     });
 
-    // 3) Fetch server data (merge-only for assigned)
     void fetchGuards();
     void fetchAssignments();
     void fetchQueue();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dayKey]);
 
-  // Persist assigned to localStorage AFTER hydration has applied
   useEffect(() => {
     if (!assignedHydratedRef.current || !allowPersistRef.current) return;
     try {
@@ -245,12 +412,21 @@ export default function Home() {
     } catch {}
   }, [assigned, dayKey]);
 
-  // -------- Handlers --------
-  const assignGuard = async (positionId: string, guardId: string) => {
-    if (usedGuardIds.includes(guardId)) return;
-    // Optimistic UI
-    setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
+  // -------- Helpers --------
+  const getDroppedGuardId = (e: DragEvent | React.DragEvent): string | null => {
+    const dt: DataTransfer | null = (e as any).dataTransfer ?? null;
+    if (!dt) return null;
+    const gid = dt.getData("application/x-guard-id") || dt.getData("text/plain");
+    return gid?.trim() || null;
+  };
 
+
+  // -------- Mutations --------
+  const assignGuard = async (positionId: string, guardId: string) => {
+    const seatedIds = new Set(Object.values(assigned).filter(Boolean) as string[]);
+    if (seatedIds.has(guardId)) return;
+
+    setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
     try {
       await fetch("/api/rotations/slot", {
         method: "POST",
@@ -260,7 +436,7 @@ export default function Home() {
           time: new Date().toISOString().slice(11, 16),
           stationId: positionId,
           guardId,
-          notes: "",
+          notes: "drag-drop-assign",
         }),
       });
     } catch (err) {
@@ -279,7 +455,7 @@ export default function Home() {
           time: new Date().toISOString().slice(11, 16),
           stationId: positionId,
           guardId: null,
-          notes: "",
+          notes: "clear-seat",
         }),
       });
     } catch (e) {
@@ -297,6 +473,7 @@ export default function Home() {
           guardId,
           returnTo,
           nowISO: simulatedNow.toISOString(),
+          notes: "drag-drop-queue",
         }),
       });
       await fetchQueue();
@@ -304,6 +481,117 @@ export default function Home() {
       console.error("Failed to add to queue:", e);
     }
   };
+
+
+  // seat drop (from PoolMap)
+  const handleSeatDrop = (seatId: string, guardId: string) => {
+    if (!onDutyIds.has(guardId)) {
+      alert("Only on-duty guards can be seated.");
+      return;
+    }
+    if (alreadyQueuedIds.has(guardId)) {
+      alert("This guard is in a queue—remove from queue before seating.");
+      return;
+    }
+    void assignGuard(seatId, guardId);
+  };
+
+  // queue drop (from BreakQueue)
+  const handleQueueDrop = (sectionId: string, guardId: string) => {
+    if (!onDutyIds.has(guardId)) {
+      alert("Only on-duty guards can be queued.");
+      return;
+    }
+    if (seatedSet.has(guardId)) {
+      alert("This guard is already seated.");
+      return;
+    }
+    if (alreadyQueuedIds.has(guardId)) return;
+    void addToQueue(guardId, sectionId);
+  };
+
+// --- helpers ---------------------------------------------------------------
+
+// Find the seat currently holding this guard (if any)
+const findSeatByGuard = (guardId: string): string | null => {
+  const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+  for (const [seatId, gid] of Object.entries(assigned)) {
+    if (gid && strip(gid) === guardId) return seatId;
+  }
+  return null;
+};
+
+// Convert a 15-min tick index back to an ISO timestamp
+const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
+
+// Remove a guard from the queue (best-effort, using clear + re-add to preserve others)
+const removeFromQueueBestEffort = async (guardId: string) => {
+  // Make sure we have a fresh snapshot of the queue
+  if (!breakQueue.length) {
+    await fetchQueue(); // uses your existing fetchQueue()
+  }
+
+  // Strip any GUARD# prefix before comparing
+  const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+
+  const remaining = breakQueue.filter((q) => strip(q.guardId) !== guardId);
+  if (remaining.length === breakQueue.length) {
+    // nothing to remove
+    return;
+  }
+
+  // 1) Clear all queues for the day
+  await fetch("/api/plan/queue-clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+    body: JSON.stringify({ date: dayKey }),
+  });
+
+  // 2) Re-add everyone except the removed guard.
+  //    We pass a synthetic nowISO computed from the stored enteredTick
+  //    so relative ordering/eligibility is preserved.
+  for (const q of remaining) {
+    await fetch("/api/plan/queue-add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({
+        date: dayKey,
+        guardId: q.guardId,
+        returnTo: q.returnTo,
+        nowISO: tickToISO(q.enteredTick),
+      }),
+    });
+  }
+
+  // 3) Refresh local state
+  await fetchQueue();
+};
+
+// --- bench drop (seat/queue -> on-duty bench) ------------------------------
+
+const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
+  const dt = e.dataTransfer;
+  const source = dt.getData("application/x-source"); // "seat" | "queue" | ""
+
+  // If coming from a seat: clear that seat (use explicit seat id or find by guard)
+  if (source === "seat") {
+    const seatId =
+      dt.getData("application/x-seat-id") ||
+      findSeatByGuard(guardId);
+    if (seatId) {
+      await clearGuard(seatId); // uses your existing clearGuard()
+    }
+  }
+
+  // If coming from a queue: remove from queue (best-effort + preserve others)
+  if (source === "queue") {
+    await removeFromQueueBestEffort(guardId);
+  }
+
+  // Ensure they’re marked on-duty so they appear on the bench
+  setOnDutyIds((prev) => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
+};
+
 
   const plus15Minutes = async () => {
     if (rotatingRef.current) return;
@@ -318,7 +606,7 @@ export default function Home() {
         body: JSON.stringify({
           date: dayKey,
           nowISO: newNow.toISOString(),
-          assignedSnapshot: assigned, // <- REQUIRED
+          assignedSnapshot: assigned,
         }),
       });
 
@@ -327,7 +615,6 @@ export default function Home() {
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
       if (data?.meta?.queuesBySection) setQueuesBySection(data.meta.queuesBySection);
-      // refresh flat list but DO NOT overwrite buckets we just set
       await fetchQueue({ keepBuckets: true });
     } catch (e) {
       console.error("Rotate failed:", e);
@@ -337,25 +624,20 @@ export default function Home() {
   };
 
   const handleRefreshAll = async () => {
-    // reset clock back to noon
     const reset = new Date(simulatedNow);
     reset.setHours(12, 0, 0, 0);
     setSimulatedNow(reset);
 
-    // clear UI state
     setBreakQueue([]);
     setQueuesBySection({});
     setAssigned(Object.fromEntries(POSITIONS.map((p) => [p.id, null])));
     setBreaks({});
-
-    // clear local cache for THIS simulated day
     try {
       localStorage.removeItem(`breaks:${dayKey}`);
-      localStorage.removeItem(`assigned:${dayKey}`); // also clear seats cache on explicit refresh
+      localStorage.removeItem(`assigned:${dayKey}`);
       localStorage.removeItem(`onDuty:${dayKey}`);
     } catch {}
 
-    // clear backend snapshots + breaks + queues (best-effort)
     try {
       const time = new Date().toISOString().slice(11, 16);
       await Promise.all(
@@ -390,14 +672,13 @@ export default function Home() {
         alert("Select at least one on-duty guard before Autopopulate.");
         return;
       }
-
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
           nowISO: simulatedNow.toISOString(),
-          allowedIds, // <-- ONLY these guards will be considered server-side
+          allowedIds,
         }),
       });
       const data = await res.json();
@@ -414,8 +695,8 @@ export default function Home() {
   // -------- Render --------
   return (
     <AppShell title="Lifeguard Rotation Manager">
-      {/* Main layout: map left, tools/queue right on lg; stacked on mobile */}
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-6 items-start">
+      {/* Desktop: 3 columns — Main | BreakQueue | On-Duty column */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start">
         {/* LEFT: Pool map */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
@@ -426,10 +707,11 @@ export default function Home() {
             onPick={(positionId) => setPickerFor(positionId)}
             onClear={clearGuard}
             conflicts={conflicts}
+            onSeatDrop={handleSeatDrop}
           />
         </section>
 
-        {/* RIGHT: Sidebar — toolbar + on-duty + queue (sticky on desktop) */}
+        {/* MIDDLE: Toolbar + Break Queue */}
         <aside className="space-y-6 lg:sticky lg:top-4 self-start">
           <ToolbarActions
             onPlus15={plus15Minutes}
@@ -441,13 +723,6 @@ export default function Home() {
               hour: "2-digit",
               minute: "2-digit",
             })}`}
-          />
-
-          {/* NEW: On-duty selector */}
-          <OnDutyPanel
-            guards={guards}
-            value={onDutyIds}
-            onChange={setOnDutyIds}
           />
 
           <BreakQueue
@@ -469,7 +744,38 @@ export default function Home() {
               }
             }}
             onAddToSection={(sec) => setQueuePickerFor(sec)}
+            onDropGuardToSection={(sec, e) => {
+              const gid = getDroppedGuardId(e);
+              if (!gid) return;
+              handleQueueDrop(sec, gid);
+            }}
           />
+        </aside>
+
+        {/* RIGHT: On-duty column (button + bench drag sources & drop target) */}
+        <aside className="space-y-4 lg:sticky lg:top-4 self-start">
+          <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-slate-100 font-semibold">On-Duty Controls</h3>
+                <p className="text-slate-400 text-sm">
+                  Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+                </p>
+              </div>
+              <button
+                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+                onClick={() => setOnDutyOpen(true)}
+              >
+                Select On-Duty
+              </button>
+            </div>
+          </section>
+
+  <OnDutyBench
+  guards={onDutyUnassigned}
+  onDropGuardToBench={handleBenchDrop}
+/>
+
         </aside>
       </div>
 
@@ -500,6 +806,15 @@ export default function Home() {
           await addToQueue(guardId, sec);
         }}
         title={queuePickerFor ? `Add guard to ${queuePickerFor}.x queue` : "Add to Queue"}
+      />
+
+      {/* On-duty selector modal */}
+      <OnDutySelectorModal
+        open={onDutyOpen}
+        onClose={() => setOnDutyOpen(false)}
+        guards={guards}
+        value={onDutyIds}
+        onChange={setOnDutyIds}
       />
 
       <GuardsListModal open={listOpen} onClose={() => setListOpen(false)} guards={guards} />

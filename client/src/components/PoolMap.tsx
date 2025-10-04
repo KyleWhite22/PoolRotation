@@ -1,9 +1,9 @@
-import { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import {
   POSITIONS,
   EDGES,
   VIEWBOX,
-  POOL_SHAPES,          // ⬅️ use shapes array instead of POOL_PATH_D
+  POOL_SHAPES,
   REST_BY_SECTION,
 } from "../../../shared/data/poolLayout.js";
 
@@ -16,24 +16,22 @@ type Props = {
   onPick: (positionId: string) => void;
   onClear: (positionId: string) => void;
   className?: string;
-  conflicts?: { stationId: string }[]; // optional
+  conflicts?: { stationId: string }[];
+  /** Called when a guard chip is dropped onto a seat */
+  onSeatDrop?: (positionId: string, guardId: string) => void;
 };
-
-function endWithPadding(ax: number, ay: number, bx: number, by: number, pad: number) {
-  const dx = bx - ax, dy = by - ay;
-  const len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len, uy = dy / len;
-  return { x2: bx - ux * pad, y2: by - uy * pad };
-}
 
 export default function PoolMap({
   guards,
   assigned,
   onPick,
-  onClear,
+  onClear, // kept for compatibility
   className,
   conflicts = [],
+  onSeatDrop,
 }: Props) {
+  const [dragSeatId, setDragSeatId] = useState<string | null>(null);
+
   const guardNameById = useMemo(() => {
     const m = new Map<string, string>();
     guards.forEach((g) => m.set(g.id, g.name));
@@ -45,10 +43,15 @@ export default function PoolMap({
     return REST_BY_SECTION?.[section] === seatId;
   };
 
+  const getDroppedGuardId = (e: React.DragEvent) => {
+    const dt = e.dataTransfer;
+    const gid = dt.getData("application/x-guard-id") || dt.getData("text/plain");
+    return gid?.trim() || null;
+  };
+
   return (
     <svg
       viewBox={`${VIEWBOX.x} ${VIEWBOX.y} ${VIEWBOX.width} ${VIEWBOX.height}`}
-      // Let it grow: fill width, take ~88% of viewport height (fallback to your prop)
       className={className ?? "w-full h-[88vh]"}
       role="img"
       aria-label="Pool map"
@@ -64,52 +67,48 @@ export default function PoolMap({
         </linearGradient>
       </defs>
 
-      {/* Draw ALL shapes from POOL_SHAPES */}
-     {POOL_SHAPES.map((s, i) =>
-  s.type === "path" ? (
-    <path
-      key={`shape-${i}`}
-      d={s.d}
-      fill={i === 0 ? "#bae6fd" : "none"}
-      stroke="#7ba7edff"
-      strokeWidth={0.8}
-      opacity={i === 0 ? 1 : 0.9}
-      vectorEffect="non-scaling-stroke"
-      pointerEvents="none"        // ⬅️ ignore clicks
-    />
-  ) : (
-    <rect
-      key={`shape-${i}`}
-      x={s.x}
-      y={s.y}
-      width={s.width}
-      height={s.height}
-      fill="none"
-      stroke="#7ba7edff"
-      strokeWidth={0.8}
-      opacity={0.9}
-      vectorEffect="non-scaling-stroke"
-      pointerEvents="none"        // ⬅️ ignore clicks
-    />
-  )
-)}
-
+      {/* Pool shapes */}
+      {POOL_SHAPES.map((s: any, i: number) =>
+        s.type === "path" ? (
+          <path
+            key={`shape-${i}`}
+            d={s.d}
+            fill={i === 0 ? "#bae6fd" : "none"}
+            stroke="#7ba7edff"
+            strokeWidth={0.8}
+            opacity={i === 0 ? 1 : 0.9}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
+        ) : (
+          <rect
+            key={`shape-${i}`}
+            x={s.x}
+            y={s.y}
+            width={s.width}
+            height={s.height}
+            fill="none"
+            stroke="#7ba7edff"
+            strokeWidth={0.8}
+            opacity={0.9}
+            vectorEffect="non-scaling-stroke"
+            pointerEvents="none"
+          />
+        )
+      )}
 
       {/* Edges */}
-      {/* edges */}
-      {EDGES.map((e) => {
-        const a = POSITIONS.find((p) => p.id === e.from)!;
-        const b = POSITIONS.find((p) => p.id === e.to)!;
+      {EDGES.map((e: any) => {
+        const a = POSITIONS.find((p: any) => p.id === e.from)!;
+        const b = POSITIONS.find((p: any) => p.id === e.to)!;
 
-        // Visual “seat box” footprint (even if you’re not drawing boxes)
         const boxW = 30, boxH = 22;
-        const pad = Math.hypot(boxW, boxH) / 2 - 5; // distance to inset from each seat
+        const pad = Math.hypot(boxW, boxH) / 2 - 5;
 
         const dx = b.x - a.x, dy = b.y - a.y;
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len, uy = dy / len;
 
-        // Inset start *and* end by the same padding
         const x1 = a.x + ux * pad;
         const y1 = a.y + uy * pad;
         const x2 = b.x - ux * pad;
@@ -132,109 +131,140 @@ export default function PoolMap({
           />
         );
       })}
-     {POSITIONS.map((p) => {
-  const guardId = assigned[p.id] ?? null;
-  const name = guardId ? guardNameById.get(guardId) ?? "" : "";
-  const [first, ...restParts] = name.split(" ");
-  const last = restParts.join(" ");
 
-  const isRest = isRestSeat(p.id);
-  const isConflict = conflicts.some((c) => c.stationId === p.id);
+      {/* Seats */}
+      {POSITIONS.map((p: any) => {
+        const guardId = assigned[p.id] ?? null;
+        const name = guardId ? guardNameById.get(guardId) ?? "" : "";
+        const [first, ...restParts] = name.split(" ");
+        const last = restParts.join(" ");
+        const isRest = isRestSeat(p.id);
+        const isConflict = conflicts.some((c) => c.stationId === p.id);
+        const isDragOver = dragSeatId === p.id;
 
-  return (
-    <g
-      key={p.id}
-      transform={`translate(${p.x} ${p.y})`}
-      className="cursor-pointer"
-      onClick={() => onPick(p.id)}
-    >
-      {/* Invisible hit area (bigger than visuals) */}
-      <rect
-        x={-22}
-        y={-22}
-        width={44}
-        height={44}
-        fill="transparent"
-        pointerEvents="all"   // ⬅️ ensure this receives the click
-      />
+        return (
+          <g
+            key={p.id}
+            transform={`translate(${p.x} ${p.y})`}
+            className="cursor-pointer"
+            data-seat-id={p.id}
+            onClick={() => onPick(p.id)}
+            // --- Drop onto seats ---
+            onDragOver={(e) => {
+              e.preventDefault();
+              if (dragSeatId !== p.id) setDragSeatId(p.id);
+            }}
+            onDragLeave={(e) => {
+              const nextTarget = e.relatedTarget as Node | null;
+              if (!nextTarget || !(e.currentTarget as Node).contains(nextTarget)) {
+                if (dragSeatId === p.id) setDragSeatId(null);
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const gid = getDroppedGuardId(e);
+              if (gid) onSeatDrop?.(p.id, gid);
+              setDragSeatId(null);
+            }}
+          >
+            {/* Invisible hit area for easy click & drop (drawn first = behind content) */}
+            <rect x={-22} y={-22} width={44} height={44} fill="transparent" pointerEvents="all" />
 
-      {/* Rest seat outline stays visible & clickable */}
-      {isRest && (
-        <rect
-          x={-14}
-          y={-14}
-          width={28}
-          height={28}
-          rx={2}
-          fill="none"
-          stroke="#dc2626"
-          strokeWidth={1.8}
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
+            {/* Drag-over highlight */}
+            {isDragOver && (
+              <rect
+                x={-18}
+                y={-18}
+                width={36}
+                height={36}
+                rx={4}
+                fill="none"
+                stroke="#60a5fa"
+                strokeWidth={2}
+                opacity={0.9}
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
 
-     {guardId ? (
-  last ? (
-    <>
-      {/* Two lines if there is a first and last */}
-      <text
-        x={0}
-        y={-2}
-        textAnchor="middle"
-        fontSize="7"
-        fill="#f1f5f9"
-      >
-        {first}
-      </text>
-      <text
-        x={0}
-        y={8}
-        textAnchor="middle"
-        fontSize="7"
-        fill="#f1f5f9"
-      >
-        {last}
-      </text>
-    </>
-  ) : (
-    /* Single line if only one word */
-    <text
-      x={0}
-      y={3}           // <- center the single name in the seat
-      textAnchor="middle"
-      fontSize="8"
-      fill="#f1f5f9"
-    >
-      {first}
-    </text>
-  )
-) : (
-  <text
-    x={0}
-    y={3}
-    textAnchor="middle"
-    fontSize="10"
-    fill="#f1f5f9"
-  >
-    X
-  </text>
-)}
+            {/* Rest seat outline */}
+            {isRest && (
+              <rect
+                x={-14}
+                y={-14}
+                width={28}
+                height={28}
+                rx={2}
+                fill="none"
+                stroke="#dc2626"
+                strokeWidth={1.8}
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
 
+            {/* Content: draggable HTML chip inside foreignObject */}
+            {guardId ? (
+              <foreignObject x={-18} y={-18} width={36} height={36}>
+                <div
+                  style={{
+                    width: "36px",
+                    height: "36px",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "#f1f5f9",
+                    fontSize: last ? "7px" : "8px",
+                    lineHeight: "10px",
+                    userSelect: "none",
+                    cursor: "grab",
+                    // critical: allow events to reach this HTML node
+                    pointerEvents: "auto",
+                  }}
+                  draggable
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPick(p.id);
+                  }}
+                  onDragStart={(e) => {
+                    // mark this drag as originating from a seat
+                    e.dataTransfer.setData("application/x-guard-id", guardId);
+                    e.dataTransfer.setData("application/x-source", "seat");
+                    e.dataTransfer.setData("application/x-seat-id", p.id);
+                    e.dataTransfer.setData("text/plain", guardId);
+                  }}
+                >
+                  {last ? (
+                    <>
+                      <span style={{ transform: "translateY(-1px)" }}>{first}</span>
+                      <span style={{ transform: "translateY(1px)" }}>{last}</span>
+                    </>
+                  ) : (
+                    <span>{first}</span>
+                  )}
+                </div>
+              </foreignObject>
+            ) : (
+              <text x={0} y={3} textAnchor="middle" fontSize="10" fill="#f1f5f9">
+                X
+              </text>
+            )}
 
-      {isConflict && (
-        <circle
-          cx={0}
-          cy={0}
-          r={16}
-          fill="none"
-          stroke="#ef4444"
-          strokeWidth={1.5}
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
-    </g>
-  );
-})}
+            {/* Conflict ring */}
+            {isConflict && (
+              <circle
+                cx={0}
+                cy={0}
+                r={16}
+                fill="none"
+                stroke="#ef4444"
+                strokeWidth={1.5}
+                vectorEffect="non-scaling-stroke"
+              />
+            )}
+          </g>
+        );
+      })}
     </svg>
   );
 }
