@@ -17,9 +17,7 @@ type Props = {
   onClear: (positionId: string) => void; // kept for compatibility
   className?: string;
   conflicts?: { stationId: string }[];
-  /** Called when a guard chip is dropped onto a seat */
   onSeatDrop?: (positionId: string, guardId: string) => void;
-  /** Set of guard IDs age ≤ 15 to underline on map */
   minorIds?: Set<string>;
 };
 
@@ -43,6 +41,16 @@ export default function PoolMap({
     guards.forEach((g) => m.set(strip(g.id), g.name));
     return m;
   }, [guards]);
+
+  // first seat per section (by first occurrence in POSITIONS)
+  const firstSeatBySection = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const p of POSITIONS as any[]) {
+      const [sec] = String(p.id).split(".");
+      if (!m.has(sec)) m.set(sec, p);
+    }
+    return m;
+  }, []);
 
   const isRestSeat = (seatId: string) => {
     const section = seatId.split(".")[0];
@@ -146,6 +154,9 @@ export default function PoolMap({
         const isDragOver = dragSeatId === p.id;
         const isMinor = guardId ? minorIds?.has(guardId) : false;
 
+        const sec = String(p.id).split(".")[0];
+        const isSectionAnchor = firstSeatBySection.get(sec)?.id === p.id;
+
         return (
           <g
             key={p.id}
@@ -153,7 +164,6 @@ export default function PoolMap({
             className="cursor-pointer"
             data-seat-id={p.id}
             onClick={() => onPick(p.id)}
-            // --- Drop onto seats ---
             onDragOver={(e) => {
               e.preventDefault();
               if (dragSeatId !== p.id) setDragSeatId(p.id);
@@ -171,8 +181,25 @@ export default function PoolMap({
               setDragSeatId(null);
             }}
           >
-            {/* big invisible hit area for click & drop */}
+            {/* big invisible hit area */}
             <rect x={-22} y={-22} width={44} height={44} fill="transparent" pointerEvents="all" />
+
+            {/* Section indicator badge (top-left of the anchor seat) */}
+            {isSectionAnchor && (
+              <g transform="translate(-24 -26)" pointerEvents="none" aria-label={`Section ${sec}`}>
+              
+                <text
+                  x={8}
+                  y={10}
+                  textAnchor="middle"
+                  fontSize="9"
+                  fontWeight="700"
+                  fill="#0ea5e9"   /* slate-900 */
+                >
+                  {sec}
+                </text>
+              </g>
+            )}
 
             {/* Drag-over highlight */}
             {isDragOver && (
@@ -222,7 +249,7 @@ export default function PoolMap({
                     lineHeight: "10px",
                     userSelect: "none",
                     cursor: "grab",
-                    pointerEvents: "auto", // critical to allow DnD
+                    pointerEvents: "auto",
                   }}
                   draggable
                   onMouseDown={(e) => e.stopPropagation()}
@@ -232,13 +259,10 @@ export default function PoolMap({
                   }}
                   onDragStart={(e) => {
                     e.dataTransfer.effectAllowed = "move";
-                    // payload BreakQueue expects:
                     e.dataTransfer.setData("application/x-guard-id", guardId);
                     e.dataTransfer.setData("application/x-source", "seat");
                     e.dataTransfer.setData("application/x-seat-id", p.id);
-                    // fallback text
                     e.dataTransfer.setData("text/plain", guardId);
-                    // optional tiny drag-image to avoid jitter
                     try {
                       const img = new Image();
                       img.src = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMXB4IiBoZWlnaHQ9IjFweCIvPg==";
@@ -283,7 +307,7 @@ export default function PoolMap({
         <text x={0} y={0} fontSize="10" fill="#f1f5f9" fontWeight="bold">
           Legend
         </text>
-        <foreignObject x={0} y={6} width={120} height={16}>
+        <foreignObject x={0} y={6} width={140} height={16}>
           <div
             style={{
               display: "flex",
@@ -294,6 +318,7 @@ export default function PoolMap({
               lineHeight: 1,
               margin: 0,
               padding: 0,
+              gap: 6,
             }}
           >
             <span
@@ -305,7 +330,8 @@ export default function PoolMap({
             >
               GuardName
             </span>
-            <span style={{ marginLeft: 2 }}>= &lt;16 yrs old</span>
+            <span>= &lt;16 yrs old</span>
+            
           </div>
         </foreignObject>
         <g transform="translate(0 26)">
