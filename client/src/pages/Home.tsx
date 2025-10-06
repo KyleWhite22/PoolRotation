@@ -34,7 +34,6 @@ function OnDutySelectorModal({
 }) {
   const [query, setQuery] = useState("");
 
-  // normalize for accent-insensitive name searches
   const norm = (s: unknown) =>
     String(s ?? "")
       .normalize("NFD")
@@ -51,11 +50,10 @@ function OnDutySelectorModal({
     [guards]
   );
 
-  // search by **name only**
   const filtered = useMemo(() => {
     const q = norm(query);
     if (!q) return sorted;
-    const tokens = q.split(/\s+/); // "jo smi" -> ["jo","smi"]
+    const tokens = q.split(/\s+/);
     return sorted.filter((g) => {
       const hay = norm(g.name);
       return tokens.every((t) => hay.includes(t));
@@ -179,6 +177,7 @@ function OnDutyBench({
                 key={g.id}
                 draggable
                 onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "move";
                   e.dataTransfer.setData("application/x-guard-id", g.id);
                   e.dataTransfer.setData("text/plain", g.id);
                   e.dataTransfer.setData("application/x-source", "bench");
@@ -244,8 +243,6 @@ export default function Home() {
   const [listOpen, setListOpen] = useState(false);
   const [onDutyOpen, setOnDutyOpen] = useState(false);
   const [movingIds, setMovingIds] = useState<Set<string>>(new Set());
-  const beginMove = (gid: string) => setMovingIds((s) => new Set(s).add(gid));
-  const endMove = (gid: string) => setMovingIds((s) => { const n = new Set(s); n.delete(gid); return n; });
 
   const rotatingRef = useRef(false);
   const SIM_KEY = "simulatedNowISO";
@@ -353,8 +350,7 @@ export default function Home() {
     const res = await fetch(`/api/rotations/day/${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
-    const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
-      await res.json();
+    const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] = await res.json();
 
     const latestByStation = new Map<string, (typeof items)[number]>();
     for (const it of items) {
@@ -365,10 +361,10 @@ export default function Home() {
     }
 
     setAssigned((prev) => {
+      if (!items || !items.length) return prev;
       const next = { ...prev };
-      for (const p of POSITIONS) {
-        const rec = latestByStation.get(p.id);
-        next[p.id] = rec?.guardId ?? null;
+      for (const [stationId, rec] of latestByStation.entries()) {
+        next[stationId] = rec?.guardId ? strip(rec.guardId) : null;
       }
       return next;
     });
@@ -396,30 +392,28 @@ export default function Home() {
     setBreakQueue(flat);
 
     if (!keepBuckets) {
-      const sectionsLocal = Array.from(
-        new Set(POSITIONS.map((p) => p.id.split(".")[0]))
-      ).sort((a, b) => Number(a) - Number(b));
+      const sectionsLocal = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
+        (a, b) => Number(a) - Number(b)
+      );
 
       const buckets: Record<string, QueueEntry[]> = {};
       for (const s of sectionsLocal) buckets[s] = [];
-      for (const q of flat as QueueEntry[]) {
-        if (!buckets[q.returnTo]) buckets[q.returnTo] = [];
-        buckets[q.returnTo].push(q);
+      for (const q of flat) {
+        (buckets[q.returnTo] ??= []).push(q);
       }
       setQueuesBySection(buckets);
     }
   };
 
-  const tickToISO = (tick: number) => new Date(tick * 15 * 60 * 1000).toISOString();
-
-  // -------------- Queue helpers / persistence --------------
-  const SECTIONS = Array.from(new Set(POSITIONS.map(p => p.id.split(".")[0]))).sort((a,b)=>Number(a)-Number(b));
+  const SECTIONS = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
+    (a, b) => Number(a) - Number(b)
+  );
   const flattenBuckets = (b: Record<string, QueueEntry[]>): QueueEntry[] =>
-    SECTIONS.flatMap((sec) => (b[sec] ?? []));
+    SECTIONS.flatMap((sec) => b[sec] ?? []);
 
-  // single-write snapshot persist (NO CLEAR)
+  // Persist the whole queue snapshot (no clear)
   const persistQueueSnapshot = async (buckets: Record<string, QueueEntry[]>) => {
-    const payload = flattenBuckets(buckets).map((q: QueueEntry) => ({
+    const payload = flattenBuckets(buckets).map((q) => ({
       guardId: q.guardId,
       returnTo: q.returnTo,
       enteredTick: q.enteredTick,
@@ -453,7 +447,7 @@ export default function Home() {
       try {
         const loc = JSON.parse(raw) as Assigned;
         const normalized: Assigned = Object.fromEntries(
-          POSITIONS.map((p) => [p.id, (loc && p.id in loc ? (loc as any)[p.id] : null)])
+          POSITIONS.map((p) => [p.id, loc && p.id in loc && loc[p.id] ? strip(loc[p.id] as string) : null])
         );
         setAssigned(normalized);
       } catch {}
@@ -479,13 +473,38 @@ export default function Home() {
 
   // -------- Seat/Queue helpers --------
   const findSeatByGuard = (gid: string): string | null => {
-    for (const [sid, g] of Object.entries(assigned)) if (g === gid) return sid;
+    const want = strip(gid);
+    for (const [sid, id] of Object.entries(assigned)) {
+      if (id && strip(id) === want) return sid;
+    }
     return null;
   };
+
+  const optimisticSeatClearByGuard = (guardId: string) => {
+    const want = strip(guardId);
+    setAssigned((prev) => {
+      let seatFound: string | null = null;
+      for (const [sid, id] of Object.entries(prev)) {
+        if (id && strip(id) === want) {
+          seatFound = sid;
+          break;
+        }
+      }
+      if (!seatFound) return prev;
+      const next = { ...prev };
+      next[seatFound] = null;
+      return next;
+    });
+  };
+
+  // Persist a single seat snapshot to the backend
   const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
     await fetch("/api/rotations/slot", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": "dev-key-123",
+      },
       body: JSON.stringify({
         date: dayKey,
         time: new Date().toISOString().slice(11, 16),
@@ -496,35 +515,14 @@ export default function Home() {
     });
   };
 
-  const optimisticSeatClearByGuard = (guardId: string) => {
-    setAssigned((prev) => {
-      let seatFound: string | null = null;
-      for (const [sid, id] of Object.entries(prev)) if (id === guardId) { seatFound = sid; break; }
-      if (!seatFound) return prev;
-      const next = { ...prev };
-      next[seatFound] = null;
-      return next;
-    });
-  };
-
   // -------- Mutations --------
   const assignGuard = async (positionId: string, guardId: string) => {
-    const seatedIds = new Set(Object.values(assigned).filter(Boolean) as string[]);
-    if (seatedIds.has(guardId)) return;
+    const gid = strip(guardId);
+    if (seatedSet.has(gid)) return;
 
-    setAssigned((prev) => ({ ...prev, [positionId]: guardId }));
+    setAssigned((prev) => ({ ...prev, [positionId]: gid }));
     try {
-      await fetch("/api/rotations/slot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          time: new Date().toISOString().slice(11, 16),
-          stationId: positionId,
-          guardId,
-          notes: "drag-drop-assign",
-        }),
-      });
+      await persistSeat(positionId, gid, "drag-drop-assign");
     } catch (err) {
       console.error("Failed to persist assignment:", err);
     }
@@ -556,7 +554,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
-          guardId,
+          guardId: strip(guardId),
           returnTo,
           nowISO: simulatedNow.toISOString(),
           notes: "drag-drop-queue",
@@ -570,27 +568,27 @@ export default function Home() {
 
   // ---- Drops: seats ----
   const handleSeatDrop = async (destSeatId: string, guardId: string) => {
-    if (!onDutyIds.has(guardId)) {
+    const gid = strip(guardId);
+    if (!onDutyIds.has(gid)) {
       alert("Only on-duty guards can be seated.");
       return;
     }
 
-    const fromSeatId = findSeatByGuard(guardId);
+    const fromSeatId = findSeatByGuard(gid);
     const destOccupant = (assigned[destSeatId] ?? null) as string | null;
     if (fromSeatId === destSeatId) return;
 
     if (fromSeatId) {
       setAssigned((prev) => {
         const next = { ...prev };
-        next[destSeatId] = guardId;
-        next[fromSeatId] = destOccupant;
+        next[destSeatId] = gid;
+        next[fromSeatId] = destOccupant ? strip(destOccupant) : null;
         return next;
       });
-
       try {
         await Promise.all([
-          persistSeat(destSeatId, guardId, "drag-seat-move"),
-          persistSeat(fromSeatId, destOccupant, "drag-seat-swap"),
+          persistSeat(destSeatId, gid, "drag-seat-move"),
+          persistSeat(fromSeatId, destOccupant ? strip(destOccupant) : null, "drag-seat-swap"),
         ]);
       } catch (e) {
         console.error("Swap persist failed:", e);
@@ -598,9 +596,9 @@ export default function Home() {
       return;
     }
 
-    setAssigned((prev) => ({ ...prev, [destSeatId]: guardId }));
+    setAssigned((prev) => ({ ...prev, [destSeatId]: gid }));
     try {
-      await persistSeat(destSeatId, guardId, "drag-seat-assign");
+      await persistSeat(destSeatId, gid, "drag-seat-assign");
     } catch (e) {
       console.error("Assign persist failed:", e);
     }
@@ -608,27 +606,35 @@ export default function Home() {
 
   // ---- Drops: queues ----
   const handleQueueMove = ({
-    guardId, fromSec, toSec, toIndex,
-  }: { guardId: string; fromSec: string; fromIndex: number; toSec: string; toIndex: number }) => {
-    setQueuesBySection(prev => {
+    guardId,
+    fromSec,
+    toSec,
+    toIndex,
+  }: {
+    guardId: string;
+    fromSec: string;
+    fromIndex: number;
+    toSec: string;
+    toIndex: number;
+  }) => {
+    const gid = strip(guardId);
+    setQueuesBySection((prev) => {
       const next: Record<string, QueueEntry[]> = {};
       for (const [sec, arr] of Object.entries(prev)) next[sec] = [...(arr ?? [])];
 
       const src = next[fromSec] ?? [];
-      const i = src.findIndex(r => r.guardId === guardId);
+      const i = src.findIndex((r) => strip(r.guardId) === gid);
       if (i === -1) return prev;
       const [row] = src.splice(i, 1);
 
       const dst = next[toSec] ?? [];
       const idx = Math.max(0, Math.min(toIndex, dst.length));
-      dst.splice(idx, 0, row);
+      dst.splice(idx, 0, { ...row, guardId: strip(row.guardId), returnTo: toSec });
 
-      // optimistic UI
       next[fromSec] = src;
       next[toSec] = dst;
       setBreakQueue(flattenBuckets(next));
 
-      // persist atomically
       void persistQueueSnapshot(next).catch(async (e) => {
         console.error("persist reorder failed", e);
         await fetchQueue({ keepBuckets: false });
@@ -639,22 +645,35 @@ export default function Home() {
   };
 
   const handleExternalToQueue = async (
-    { guardId, source, sec, index }: { guardId: string; source: "bench" | "seat" | ""; sec: string; index: number },
+    {
+      guardId,
+      source,
+      sec,
+      index,
+    }: { guardId: string; source: "bench" | "seat" | ""; sec: string; index: number },
     e: React.DragEvent
   ) => {
+    const gid = strip(guardId);
     const currentTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
 
     if (source === "seat") {
-      const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
-      if (seatId) setAssigned(prev => ({ ...prev, [seatId]: null }));
+      const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(gid);
+      if (seatId) setAssigned((prev) => ({ ...prev, [seatId]: null }));
     }
 
-    setQueuesBySection(prev => {
+    setQueuesBySection((prev) => {
+      const alreadyQueued =
+        Object.values(prev).some((arr) => (arr ?? []).some((r) => strip(r.guardId) === gid)) ||
+        breakQueue.some((r) => strip(r.guardId) === gid);
+
+      if (alreadyQueued) return prev;
+
       const next: Record<string, QueueEntry[]> = {};
       for (const [s, arr] of Object.entries(prev)) {
-        next[s] = (arr ?? []).filter(r => r.guardId !== guardId);
+        next[s] = (arr ?? []).filter((r) => strip(r.guardId) !== gid);
       }
-      const row: QueueEntry = { guardId, returnTo: sec, enteredTick: currentTick };
+
+      const row: QueueEntry = { guardId: gid, returnTo: sec, enteredTick: currentTick };
       const dst = next[sec] ?? [];
       const idx = Math.max(0, Math.min(index, dst.length));
       dst.splice(idx, 0, row);
@@ -665,11 +684,16 @@ export default function Home() {
       void (async () => {
         try {
           if (source === "seat") {
-            const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
+            const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(gid);
             if (seatId) {
-              await fetch("/api/rotations/slot", {
+              await fetch(`/api/rotations/slot?v=${Date.now()}`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-api-key": "dev-key-123",
+                  "Cache-Control": "no-store",
+                },
+                cache: "no-store" as RequestCache,
                 body: JSON.stringify({
                   date: dayKey,
                   time: new Date().toISOString().slice(11, 16),
@@ -692,15 +716,21 @@ export default function Home() {
   };
 
   const handleQueueDrop = async (sectionId: string, guardId: string) => {
-    if (!onDutyIds.has(guardId)) setOnDutyIds(prev => new Set([...prev, guardId]));
+    const gid = strip(guardId);
+    if (!onDutyIds.has(gid)) setOnDutyIds((prev) => new Set([...prev, gid]));
 
-    if (Object.values(queuesBySection).some(arr => (arr ?? []).some((qq: QueueEntry) => qq.guardId === guardId))) return;
+    if (
+      Object.values(queuesBySection).some((arr) =>
+        (arr ?? []).some((qq: QueueEntry) => strip(qq.guardId) === gid)
+      )
+    )
+      return;
 
     const enteredTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
 
     const next: Record<string, QueueEntry[]> = {};
     for (const [sec, arr] of Object.entries(queuesBySection)) next[sec] = [...(arr ?? [])];
-    (next[sectionId] ??= []).push({ guardId, returnTo: sectionId, enteredTick });
+    (next[sectionId] ??= []).push({ guardId: gid, returnTo: sectionId, enteredTick });
 
     await applyBucketsAndPersist(next);
   };
@@ -716,12 +746,12 @@ export default function Home() {
     if (src === "queue") {
       const next: Record<string, QueueEntry[]> = {};
       for (const [sec, arr] of Object.entries(queuesBySection)) {
-        next[sec] = (arr ?? []).filter((qq: QueueEntry) => qq.guardId !== guardId);
+        next[sec] = (arr ?? []).filter((qq: QueueEntry) => strip(qq.guardId) !== strip(guardId));
       }
       await applyBucketsAndPersist(next);
     }
 
-    setOnDutyIds(prev => (prev.has(guardId) ? prev : new Set([...prev, guardId])));
+    setOnDutyIds((prev) => (prev.has(strip(guardId)) ? prev : new Set([...prev, strip(guardId)])));
   };
 
   // ---- Rotate / Refresh / Autopopulate
@@ -762,16 +792,21 @@ export default function Home() {
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({ date: dayKey }),
       });
-      setBreakQueue([]);
-      setQueuesBySection({});
     } catch (e) {
       console.error("Failed to clear queues:", e);
+    } finally {
+      setBreakQueue([]);
+      setQueuesBySection({});
     }
   };
 
   const handleRefreshAll = async () => {
+    const prevDayKey = dayKey;
+
     const reset = new Date(simulatedNow);
     reset.setHours(12, 0, 0, 0);
+    const nextDayKey = ymdLocal(reset);
+
     setSimulatedNow(reset);
 
     setOnDutyOpen(false);
@@ -784,31 +819,43 @@ export default function Home() {
     setConflicts([]);
 
     try {
-      localStorage.removeItem(`breaks:${dayKey}`);
-      localStorage.removeItem(`assigned:${dayKey}`);
-      localStorage.removeItem(`onDuty:${dayKey}`);
+      for (const k of [prevDayKey, nextDayKey]) {
+        localStorage.removeItem(`breaks:${k}`);
+        localStorage.removeItem(`assigned:${k}`);
+        localStorage.removeItem(`onDuty:${k}`);
+      }
     } catch {}
 
     try {
       const time = new Date().toISOString().slice(11, 16);
       await Promise.allSettled([
         ...POSITIONS.map((p) =>
-          fetch("/api/rotations/slot", {
+          fetch("/api/rotations/slot?v=" + Date.now(), {
             method: "POST",
-            headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": "dev-key-123",
+              "Cache-Control": "no-store",
+            },
             body: JSON.stringify({
-              date: dayKey,
+              date: nextDayKey,
               time,
               stationId: p.id,
               guardId: null,
               notes: "refresh-all",
             }),
+            cache: "no-store" as RequestCache,
           })
         ),
-        fetch("/api/plan/queue-clear", {
+        fetch("/api/plan/queue-clear?v=" + Date.now(), {
           method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-          body: JSON.stringify({ date: dayKey }),
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": "dev-key-123",
+            "Cache-Control": "no-store",
+          },
+          body: JSON.stringify({ date: nextDayKey }),
+          cache: "no-store" as RequestCache,
         }),
       ]);
     } catch (e) {
@@ -876,17 +923,12 @@ export default function Home() {
   // -------- Render --------
   return (
     <AppShell title="Lifeguard Rotation Manager">
-      {/* Desktop: 3 columns — Main | BreakQueue | On-Duty column */}
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start">
         {/* LEFT: Clock + Pool map */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
           <div className="mb-3 grid place-items-center">
-            <SimClock
-              now={simulatedNow}
-              onRotate={plus15Minutes}
-              disabled={rotatingRef.current}
-            />
+            <SimClock now={simulatedNow} onRotate={plus15Minutes} disabled={rotatingRef.current} />
           </div>
 
           <PoolMap
@@ -897,7 +939,7 @@ export default function Home() {
             onClear={clearGuard}
             conflicts={conflicts}
             onSeatDrop={handleSeatDrop}
-            minorIds={minor15Ids}   // <-- underline minors in your PoolMap chip
+            minorIds={minor15Ids}
           />
         </section>
 
@@ -946,10 +988,7 @@ export default function Home() {
             </div>
           </section>
 
-          <OnDutyBench
-            guards={onDutyUnassigned}
-            onDropGuardToBench={handleBenchDrop}
-          />
+            <OnDutyBench guards={onDutyUnassigned} onDropGuardToBench={handleBenchDrop} />
         </aside>
       </div>
 

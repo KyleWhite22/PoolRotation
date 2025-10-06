@@ -37,7 +37,7 @@ export default function AppShell({
       <header className="h-16 flex items-center px-6 border-b border-pool-700 bg-pool-900">
         {/* Left: Logo + Title */}
         <div className="flex items-center gap-3">
-          <img src="/hilliardLogoWhite.svg" alt="Pool Logo" className="h-10 w-10 object-contain" />
+          <img src="/hilliardLogoWhite.svg" alt="Pool Logo" className="h-20 w-20 object-contain" />
           <h1 className="text-xl font-semibold">{title}</h1>
         </div>
 

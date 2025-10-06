@@ -61,56 +61,52 @@ export default function BreakQueue({
     );
   };
 
-  const labelFor = (gidRaw: string) => {
-    const id = strip(gidRaw);
-    return guardById.get(id)?.name || id;
-  };
+ const labelFor = (gidRaw: string) => {
+  const id = strip(gidRaw);
+  return guardById.get(id)?.name || id;
+};
 
   // Small invisible gap between chips to accept precise index drops
   const Gap = ({ sec, index }: { sec: string; index: number }) => (
-    <span
-      className="inline-block w-2 h-6 align-middle"
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        e.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
+  <span
+    className="inline-block align-middle"
+    style={{ width: 12, height: 24, outline: "none" }}
+    onDragOver={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+      setDragOverSec(sec);
+    }}
+    onDrop={(e) => {
+      e.preventDefault();
+      e.stopPropagation();
 
-        const dt = e.dataTransfer;
-        const rawId = dt.getData("application/x-guard-id") || dt.getData("text/plain");
-        if (!rawId) return;
+      const dt = e.dataTransfer;
+      const rawId = dt.getData("application/x-guard-id") || dt.getData("text/plain");
+      if (!rawId) return;
 
-        const guardId = rawId.trim();
-        const source = (dt.getData("application/x-source") || "") as
-          | "queue"
-          | "bench"
-          | "seat"
-          | "";
-        const fromSec = dt.getData("application/x-queue-section") || "";
-        const fromIndexRaw = dt.getData("application/x-queue-index");
-        const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
+      const guardId = rawId.trim();
+      const source = (dt.getData("application/x-source") || "") as "queue" | "bench" | "seat" | "";
+      const fromSec = dt.getData("application/x-queue-section") || "";
+      const fromIndexRaw = dt.getData("application/x-queue-index");
+      const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
 
-        if (source === "queue" && fromSec) {
-          onMoveWithinQueue?.({
-            guardId,
-            fromSec,
-            fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
-            toSec: sec,
-            toIndex: index,
-          });
-        } else {
-          onDropExternalToQueue?.(
-            { guardId, source: source === "queue" ? "" : source, sec, index },
-            e
-          );
-        }
-        setDragOverSec(null);
-      }}
-    />
-  );
+      if (source === "queue" && fromSec) {
+        onMoveWithinQueue?.({
+          guardId,
+          fromSec,
+          fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
+          toSec: sec,
+          toIndex: index,
+        });
+      } else {
+        // pass source as-is; Home will handle normalization/persist
+        onDropExternalToQueue?.({ guardId, source: source as "" | "bench" | "seat", sec, index }, e);
+      }
+      setDragOverSec(null);
+    }}
+  />
+);
 
   return (
     <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
@@ -169,83 +165,93 @@ export default function BreakQueue({
                   setDragOverSec(null);
                 }}
               >
-                {entries.length ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    {/* Leading gap (index 0) */}
-                    <Gap sec={sec} index={0} />
+               {entries.length ? (
+  <div className="flex flex-wrap items-center gap-2">
+    <Gap sec={sec} index={0} />
+ {entries.map((q, i) => {
+  const gid = strip(q.guardId);
+  const label = labelFor(gid);
 
-                    {entries.map((q: QueueEntry, i: number) => {
-                      const gid = strip(q.guardId);
-                      const label = labelFor(gid);
-                      return (
-                        <Fragment key={`${sec}-${i}-${gid}`}>
-                          {/* Chip */}
-                          <span
-                            className="px-2 py-0.5 rounded bg-slate-900/70 border border-slate-700 text-slate-100 text-sm select-none cursor-grab active:cursor-grabbing"
-                            draggable
-                            onDragStart={(e) => {
-                              e.dataTransfer.effectAllowed = "move";
-                              e.dataTransfer.setData("application/x-guard-id", gid);
-                              e.dataTransfer.setData("application/x-source", "queue");
-                              e.dataTransfer.setData("application/x-queue-section", sec);
-                              e.dataTransfer.setData("application/x-queue-index", String(i));
-                              e.dataTransfer.setData("text/plain", gid);
-                            }}
-                            onDragOver={(e) => {
-                              // Allow dropping ON the chip (treated as insert-before).
-                              e.preventDefault();
-                              e.stopPropagation();
-                              e.dataTransfer.dropEffect = "move";
-                            }}
-                            onDrop={(e) => {
-                              // Insert before this chip
-                              e.preventDefault();
-                              e.stopPropagation();
+  return (
+    <Fragment key={`${sec}-${i}-${gid}`}>
+      {/* Chip */}
+      <span
+  className="px-2 py-0.5 rounded bg-slate-900/70 border border-slate-700 text-slate-100 text-sm select-none cursor-grab active:cursor-grabbing"
+  draggable
+  onDragStart={(e) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("application/x-guard-id", gid); // already stripped for consistency
+    e.dataTransfer.setData("application/x-source", "queue");
+    e.dataTransfer.setData("application/x-queue-section", sec);
+    e.dataTransfer.setData("application/x-queue-index", String(i));
+    e.dataTransfer.setData("text/plain", gid);
+  }}
+  onDragOver={(e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "move";
+  }}
+  onDrop={(e) => {
+    e.preventDefault();
+    e.stopPropagation();
 
-                              const dt = e.dataTransfer;
-                              const rawId =
-                                dt.getData("application/x-guard-id") || dt.getData("text/plain");
-                              if (!rawId) return;
+    const dt = e.dataTransfer;
+    const rawId = dt.getData("application/x-guard-id") || dt.getData("text/plain");
+    if (!rawId) return;
 
-                              const guardId = rawId.trim();
-                              const source = (dt.getData("application/x-source") || "") as
-                                | "queue"
-                                | "bench"
-                                | "seat"
-                                | "";
-                              const fromSec = dt.getData("application/x-queue-section") || "";
-                              const fromIndexRaw = dt.getData("application/x-queue-index");
-                              const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
+    const guardId = rawId.trim();
+    const source = (dt.getData("application/x-source") || "") as "queue" | "bench" | "seat" | "";
+    const fromSec = dt.getData("application/x-queue-section") || "";
+    const fromIndexRaw = dt.getData("application/x-queue-index");
+    const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
 
-                              if (source === "queue" && fromSec) {
-                                onMoveWithinQueue?.({
-                                  guardId,
-                                  fromSec,
-                                  fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
-                                  toSec: sec,
-                                  toIndex: i,
-                                });
-                              } else {
-                                onDropExternalToQueue?.(
-                                  { guardId, source: source === "queue" ? "" : source, sec, index: i },
-                                  e
-                                );
-                              }
-                              setDragOverSec(null);
-                            }}
-                          >
-                            {label}
-                          </span>
+    if (source === "queue" && fromSec) {
+      onMoveWithinQueue?.({
+        guardId,
+        fromSec,
+        fromIndex: Number.isFinite(fromIndex) ? fromIndex : -1,
+        toSec: sec,
+        toIndex: i, // insert before this chip
+      });
+    } else {
+      onDropExternalToQueue?.({ guardId, source: source as "" | "bench" | "seat", sec, index: i }, e);
+    }
+    setDragOverSec(null);
+  }}
+>
+  {label}
+</span>
+      {/* Gap after this chip */}
+      <Gap sec={sec} index={i + 1} />
+    </Fragment>
+  );
+})}
 
-                          {/* Gap after this chip => index i+1 */}
-                          <Gap sec={sec} index={i + 1} />
-                        </Fragment>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <span className="text-slate-500 text-sm">—</span>
-                )}
+  </div>
+) : (
+  <div
+    className="flex items-center justify-center text-slate-500 text-sm h-10 rounded"
+    onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverSec(sec); }}
+    onDrop={(e) => {
+  e.preventDefault(); e.stopPropagation();
+  const dt = e.dataTransfer;
+  const gid = (dt.getData("application/x-guard-id") || dt.getData("text/plain"))?.trim();
+  if (!gid) return;
+  const source = (dt.getData("application/x-source") || "") as "queue" | "bench" | "seat" | "";
+  if (source === "queue") {
+    const fromSec = dt.getData("application/x-queue-section") || "";
+    const fromIndexRaw = dt.getData("application/x-queue-index");
+    const fromIndex = fromIndexRaw ? parseInt(fromIndexRaw, 10) : -1;
+    onMoveWithinQueue?.({ guardId: gid, fromSec, fromIndex, toSec: sec, toIndex: 0 });
+  } else {
+    onDropExternalToQueue?.({ guardId: gid, source: source as "" | "bench" | "seat", sec, index: 0 }, e);
+  }
+  setDragOverSec(null);
+}}
+  >
+    Drop here
+  </div>
+)}
               </div>
             </li>
           );

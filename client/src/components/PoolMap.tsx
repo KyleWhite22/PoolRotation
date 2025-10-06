@@ -23,6 +23,9 @@ type Props = {
   minorIds?: Set<string>;
 };
 
+// ---- helpers ----
+const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+
 export default function PoolMap({
   guards,
   assigned,
@@ -37,7 +40,7 @@ export default function PoolMap({
 
   const guardNameById = useMemo(() => {
     const m = new Map<string, string>();
-    guards.forEach((g) => m.set(g.id, g.name));
+    guards.forEach((g) => m.set(strip(g.id), g.name));
     return m;
   }, [guards]);
 
@@ -64,10 +67,6 @@ export default function PoolMap({
         <marker id="arrowhead" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto" markerUnits="strokeWidth">
           <path d="M0,0 L5,2.5 L0,5 Z" fill="#60a5fa" />
         </marker>
-        <linearGradient id="poolFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.25" />
-          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.15" />
-        </linearGradient>
       </defs>
 
       {/* Pool shapes */}
@@ -137,14 +136,15 @@ export default function PoolMap({
 
       {/* Seats */}
       {POSITIONS.map((p: any) => {
-        const guardId = assigned[p.id] ?? null;
+        const rawId = assigned[p.id] ?? null;
+        const guardId = rawId ? strip(rawId) : null; // normalize
         const name = guardId ? guardNameById.get(guardId) ?? "" : "";
         const [first, ...restParts] = name.split(" ");
         const last = restParts.join(" ");
         const isRest = isRestSeat(p.id);
         const isConflict = conflicts.some((c) => c.stationId === p.id);
         const isDragOver = dragSeatId === p.id;
-        const isMinor = guardId ? minorIds?.has(guardId) : false; // ← underline trigger
+        const isMinor = guardId ? minorIds?.has(guardId) : false;
 
         return (
           <g
@@ -167,11 +167,11 @@ export default function PoolMap({
             onDrop={(e) => {
               e.preventDefault();
               const gid = getDroppedGuardId(e);
-              if (gid) onSeatDrop?.(p.id, gid);
+              if (gid) onSeatDrop?.(p.id, strip(gid));
               setDragSeatId(null);
             }}
           >
-            {/* Invisible hit area for easy click & drop (drawn first = behind content) */}
+            {/* big invisible hit area for click & drop */}
             <rect x={-22} y={-22} width={44} height={44} fill="transparent" pointerEvents="all" />
 
             {/* Drag-over highlight */}
@@ -205,25 +205,24 @@ export default function PoolMap({
               />
             )}
 
-            {/* Content: draggable HTML chip inside foreignObject */}
+            {/* Occupant chip (draggable) */}
             {guardId ? (
               <foreignObject x={-18} y={-18} width={36} height={36}>
                 <div
                   className={isMinor ? "underline underline-offset-2 decoration-amber-400" : undefined}
                   style={{
-                    width: "36px",
-                    height: "36px",
+                    width: 36,
+                    height: 36,
                     display: "flex",
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
                     color: "#f1f5f9",
-                    fontSize: last ? "7px" : "8px",
+                    fontSize: last ? 7 : 8,
                     lineHeight: "10px",
                     userSelect: "none",
                     cursor: "grab",
-                    // critical: allow events to reach this HTML node
-                    pointerEvents: "auto",
+                    pointerEvents: "auto", // critical to allow DnD
                   }}
                   draggable
                   onMouseDown={(e) => e.stopPropagation()}
@@ -232,11 +231,19 @@ export default function PoolMap({
                     onPick(p.id);
                   }}
                   onDragStart={(e) => {
-                    // mark this drag as originating from a seat
+                    e.dataTransfer.effectAllowed = "move";
+                    // payload BreakQueue expects:
                     e.dataTransfer.setData("application/x-guard-id", guardId);
                     e.dataTransfer.setData("application/x-source", "seat");
                     e.dataTransfer.setData("application/x-seat-id", p.id);
+                    // fallback text
                     e.dataTransfer.setData("text/plain", guardId);
+                    // optional tiny drag-image to avoid jitter
+                    try {
+                      const img = new Image();
+                      img.src = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMXB4IiBoZWlnaHQ9IjFweCIvPg==";
+                      e.dataTransfer.setDragImage(img, 0, 0);
+                    } catch {}
                   }}
                 >
                   {last ? (
@@ -270,6 +277,44 @@ export default function PoolMap({
           </g>
         );
       })}
+
+      {/* Legend (compact) */}
+      <g transform={`translate(${VIEWBOX.x + 10} ${VIEWBOX.y + 20})`}>
+        <text x={0} y={0} fontSize="10" fill="#f1f5f9" fontWeight="bold">
+          Legend
+        </text>
+        <foreignObject x={0} y={6} width={120} height={16}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              whiteSpace: "nowrap",
+              fontSize: 9,
+              color: "#f1f5f9",
+              lineHeight: 1,
+              margin: 0,
+              padding: 0,
+            }}
+          >
+            <span
+              style={{
+                textDecoration: "underline",
+                textDecorationColor: "#facc15",
+                textUnderlineOffset: 2,
+              }}
+            >
+              GuardName
+            </span>
+            <span style={{ marginLeft: 2 }}>= &lt;16 yrs old</span>
+          </div>
+        </foreignObject>
+        <g transform="translate(0 26)">
+          <rect x={0} y={0} width={12} height={12} stroke="#dc2626" strokeWidth={1.5} fill="none" rx={2} />
+          <text x={16} y={9} fontSize="9" fill="#f1f5f9">
+            Rest chair
+          </text>
+        </g>
+      </g>
     </svg>
   );
 }
