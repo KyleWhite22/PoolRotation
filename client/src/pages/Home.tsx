@@ -33,32 +33,34 @@ function OnDutySelectorModal({
   onChange: (next: Set<string>) => void;
 }) {
   const [query, setQuery] = useState("");
-const norm = (s: unknown) =>
-  String(s ?? "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // strip accents
-    .toLowerCase()
-    .trim();
+
+  // normalize for accent-insensitive name searches
+  const norm = (s: unknown) =>
+    String(s ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
 
   useEffect(() => {
     if (!open) setQuery("");
   }, [open]);
 
- const sorted = useMemo(
-  () =>
-    [...guards].sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
-  [guards]
-);
+  const sorted = useMemo(
+    () => [...guards].sort((a, b) => norm(a.name).localeCompare(norm(b.name))),
+    [guards]
+  );
 
+  // search by **name only**
   const filtered = useMemo(() => {
-  const q = norm(query);
-  if (!q) return sorted;
-  const tokens = q.split(/\s+/); // "jo smi" -> ["jo","smi"]
-  return sorted.filter((g) => {
-    const hay = norm(g.name);
-    return tokens.every((t) => hay.includes(t));
-  });
-}, [sorted, query])
+    const q = norm(query);
+    if (!q) return sorted;
+    const tokens = q.split(/\s+/); // "jo smi" -> ["jo","smi"]
+    return sorted.filter((g) => {
+      const hay = norm(g.name);
+      return tokens.every((t) => hay.includes(t));
+    });
+  }, [sorted, query]);
 
   const toggle = (gid: string) => {
     const next = new Set(value);
@@ -366,7 +368,7 @@ export default function Home() {
       const next = { ...prev };
       for (const p of POSITIONS) {
         const rec = latestByStation.get(p.id);
-        if (rec?.guardId) next[p.id] = rec.guardId;
+        next[p.id] = rec?.guardId ?? null;
       }
       return next;
     });
@@ -605,7 +607,6 @@ export default function Home() {
   };
 
   // ---- Drops: queues ----
-  // precise within/between reordering (queue → queue)
   const handleQueueMove = ({
     guardId, fromSec, toSec, toIndex,
   }: { guardId: string; fromSec: string; fromIndex: number; toSec: string; toIndex: number }) => {
@@ -637,14 +638,12 @@ export default function Home() {
     });
   };
 
-  // bench/seat → queue at index
   const handleExternalToQueue = async (
     { guardId, source, sec, index }: { guardId: string; source: "bench" | "seat" | ""; sec: string; index: number },
     e: React.DragEvent
   ) => {
     const currentTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
 
-    // if from seat, optimistically clear it
     if (source === "seat") {
       const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(guardId);
       if (seatId) setAssigned(prev => ({ ...prev, [seatId]: null }));
@@ -661,10 +660,8 @@ export default function Home() {
       dst.splice(idx, 0, row);
       next[sec] = dst;
 
-      // optimistic UI
       setBreakQueue(flattenBuckets(next));
 
-      // persist atomically; also clear seat on server if needed
       void (async () => {
         try {
           if (source === "seat") {
@@ -694,12 +691,9 @@ export default function Home() {
     });
   };
 
-  // append (legacy bucket background drop)
   const handleQueueDrop = async (sectionId: string, guardId: string) => {
-    // mark on-duty if needed
     if (!onDutyIds.has(guardId)) setOnDutyIds(prev => new Set([...prev, guardId]));
 
-    // if already in any bucket, ignore (use precise reorder instead)
     if (Object.values(queuesBySection).some(arr => (arr ?? []).some((qq: QueueEntry) => qq.guardId === guardId))) return;
 
     const enteredTick = Math.floor(Date.parse(simulatedNow.toISOString()) / (15 * 60 * 1000));
@@ -711,7 +705,6 @@ export default function Home() {
     await applyBucketsAndPersist(next);
   };
 
-  // queue → bench (drop on OnDutyBench)
   const handleBenchDrop = async (guardId: string, e: React.DragEvent) => {
     const src = e.dataTransfer.getData("application/x-source");
 
@@ -721,7 +714,6 @@ export default function Home() {
     }
 
     if (src === "queue") {
-      // remove from buckets and persist via queue-set (NO CLEAR spam)
       const next: Record<string, QueueEntry[]> = {};
       for (const [sec, arr] of Object.entries(queuesBySection)) {
         next[sec] = (arr ?? []).filter((qq: QueueEntry) => qq.guardId !== guardId);
@@ -834,7 +826,6 @@ export default function Home() {
         return;
       }
 
-      // lock all currently queued guards (do not move)
       const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => strip(q.guardId))));
 
       const res = await fetch("/api/plan/autopopulate", {
@@ -860,6 +851,28 @@ export default function Home() {
     }
   };
 
+  // util to compute age
+  const calcAge = (dob?: string | null): number | null => {
+    if (!dob) return null;
+    const d = new Date(dob);
+    if (isNaN(d.getTime())) return null;
+    const now = new Date();
+    let age = now.getFullYear() - d.getFullYear();
+    const m = now.getMonth() - d.getMonth();
+    if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+    return age;
+  };
+
+  // set of guard IDs who are 15 or younger (for underline styling in PoolMap)
+  const minor15Ids = useMemo(() => {
+    const s = new Set<string>();
+    for (const g of guards) {
+      const a = calcAge(g.dob ?? null);
+      if (a !== null && a <= 15) s.add(g.id);
+    }
+    return s;
+  }, [guards]);
+
   // -------- Render --------
   return (
     <AppShell title="Lifeguard Rotation Manager">
@@ -884,6 +897,7 @@ export default function Home() {
             onClear={clearGuard}
             conflicts={conflicts}
             onSeatDrop={handleSeatDrop}
+            minorIds={minor15Ids}   // <-- underline minors in your PoolMap chip
           />
         </section>
 
@@ -904,7 +918,6 @@ export default function Home() {
             seatedSet={seatedSet}
             guards={guards}
             onClearAll={handleClearQueues}
-            // Background drop on bucket = append (legacy)
             onDropGuardToSection={(sec, e) => {
               const gid =
                 e.dataTransfer.getData("application/x-guard-id") ||
@@ -912,9 +925,7 @@ export default function Home() {
               if (!gid) return;
               void handleQueueDrop(sec, gid.trim());
             }}
-            // Precise within/between reordering
             onMoveWithinQueue={handleQueueMove}
-            // Bench/Seat → Queue at specific index
             onDropExternalToQueue={(payload, e) => handleExternalToQueue(payload, e)}
           />
         </aside>
@@ -922,19 +933,16 @@ export default function Home() {
         {/* RIGHT: On-duty column */}
         <aside className="space-y-4 lg:sticky lg:top-4 self-start">
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-slate-100 font-semibold">On-Duty Controls</h3>
-                <p className="text-slate-400 text-sm">
-                  Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
-                </p>
-              </div>
+            <div className="flex flex-col items-center gap-2 text-center">
               <button
-                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm"
+                className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
                 onClick={() => setOnDutyOpen(true)}
               >
-                Select On-Duty
+                Select On-Duty Guards
               </button>
+              <p className="text-slate-400 text-sm">
+                Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+              </p>
             </div>
           </section>
 

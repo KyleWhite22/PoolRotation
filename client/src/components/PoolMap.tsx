@@ -14,21 +14,24 @@ type Props = {
   guards: Guard[];
   assigned: Assigned;
   onPick: (positionId: string) => void;
-  onClear: (positionId: string) => void;
+  onClear: (positionId: string) => void; // kept for compatibility
   className?: string;
   conflicts?: { stationId: string }[];
   /** Called when a guard chip is dropped onto a seat */
   onSeatDrop?: (positionId: string, guardId: string) => void;
+  /** Set of guard IDs age ≤ 15 to underline on map */
+  minorIds?: Set<string>;
 };
 
 export default function PoolMap({
   guards,
   assigned,
   onPick,
-  onClear, // kept for compatibility
+  onClear, // not used here, kept for API compatibility
   className,
   conflicts = [],
   onSeatDrop,
+  minorIds,
 }: Props) {
   const [dragSeatId, setDragSeatId] = useState<string | null>(null);
 
@@ -141,6 +144,7 @@ export default function PoolMap({
         const isRest = isRestSeat(p.id);
         const isConflict = conflicts.some((c) => c.stationId === p.id);
         const isDragOver = dragSeatId === p.id;
+        const isMinor = guardId ? minorIds?.has(guardId) : false; // ← underline trigger
 
         return (
           <g
@@ -205,6 +209,7 @@ export default function PoolMap({
             {guardId ? (
               <foreignObject x={-18} y={-18} width={36} height={36}>
                 <div
+                  className={isMinor ? "underline underline-offset-2 decoration-amber-400" : undefined}
                   style={{
                     width: "36px",
                     height: "36px",
