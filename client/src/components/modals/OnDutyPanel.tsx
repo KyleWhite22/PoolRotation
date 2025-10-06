@@ -2,13 +2,16 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import type { Guard } from "../../lib/types";
 
 type Props = {
-  open: boolean;                // NEW: modal visibility
-  onClose: () => void;          // NEW: close modal
+  open: boolean;
+  onClose: () => void;
   guards: Guard[];
-  value: Set<string>;           // on-duty guard IDs
+  value: Set<string>;                 // on-duty guard IDs (may arrive mixed)
   onChange: (next: Set<string>) => void;
   className?: string;
 };
+
+// normalize helper — always work with plain guard ids
+const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 
 export default function OnDutyPanel({
   open,
@@ -23,58 +26,88 @@ export default function OnDutyPanel({
 
   // Focus search when opened
   useEffect(() => {
-    if (open) {
-      const id = window.setTimeout(() => inputRef.current?.focus(), 0);
-      return () => window.clearTimeout(id);
-    }
+    if (!open) return;
+    const id = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
   }, [open]);
 
   // ESC to close
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  // Ensure upstream Set is normalized (once per change)
+  useEffect(() => {
+    const normalized = new Set([...value].map((id) => strip(String(id))));
+    // only push if it's actually different
+    if (
+      normalized.size !== value.size ||
+      [...normalized].some((id) => !value.has(id))
+    ) {
+      onChange(normalized);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]); // rely on parent to keep referential stability
+
+  // Work locally with normalized selection
+  const normValue = useMemo(
+    () => new Set([...value].map((id) => strip(String(id)))),
+    [value]
+  );
+
+  // Sort & filter (accent/Case-insensitive optional)
+  const norm = (s: unknown) =>
+    String(s ?? "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .trim();
+
   const sorted = useMemo(
     () =>
       [...guards].sort((a, b) =>
-        (a.name || a.id).localeCompare(b.name || b.id, undefined, { sensitivity: "base" })
+        norm(a.name || a.id).localeCompare(norm(b.name || b.id))
       ),
     [guards]
   );
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = norm(query);
     if (!q) return sorted;
-    return sorted.filter((g) => (g.name || "").toLowerCase().includes(q) || g.id.toLowerCase().includes(q));
+    const tokens = q.split(/\s+/).filter(Boolean);
+    return sorted.filter((g) => {
+      const hay = norm(g.name || g.id);
+      return tokens.every((t) => hay.includes(t));
+    });
   }, [sorted, query]);
 
-  const toggle = (gid: string) => {
-    const next = new Set(value);
+  // Mutators (always write stripped IDs)
+  const toggle = (gidRaw: string) => {
+    const gid = strip(gidRaw);
+    const next = new Set(normValue);
     next.has(gid) ? next.delete(gid) : next.add(gid);
     onChange(next);
   };
 
   const selectAllFiltered = () => {
-    const next = new Set(value);
-    for (const g of filtered) next.add(g.id);
+    const next = new Set(normValue);
+    for (const g of filtered) next.add(strip(g.id));
     onChange(next);
   };
 
   const clearAllFiltered = () => {
     if (!filtered.length) return;
-    const ids = new Set(filtered.map((g) => g.id));
-    const next = new Set([...value].filter((id) => !ids.has(id)));
+    const ids = new Set(filtered.map((g) => strip(g.id)));
+    const next = new Set([...normValue].filter((id) => !ids.has(id)));
     onChange(next);
   };
 
   const clearAll = () => onChange(new Set());
 
-  const count = value.size;
+  const count = normValue.size;
   const total = guards.length;
 
   if (!open) return null;
@@ -89,10 +122,7 @@ export default function OnDutyPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby="on-duty-title"
-        className={[
-          "absolute inset-0 flex items-center justify-center p-4",
-          className || "",
-        ].join(" ")}
+        className={["absolute inset-0 flex items-center justify-center p-4", className || ""].join(" ")}
         onClick={(e) => e.stopPropagation()}
       >
         <section className="w-full max-w-2xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
@@ -149,7 +179,8 @@ export default function OnDutyPanel({
           {/* List */}
           <ul className="max-h-[50vh] overflow-auto divide-y divide-slate-800">
             {filtered.map((g) => {
-              const checked = value.has(g.id);
+              const id = strip(g.id);
+              const checked = normValue.has(id);
               return (
                 <li
                   key={g.id}
@@ -157,13 +188,13 @@ export default function OnDutyPanel({
                 >
                   <div className="min-w-0">
                     <p className="text-slate-100 truncate">{g.name || g.id}</p>
-                    <p className="text-slate-400 text-xs truncate">{g.id}</p>
+                    <p className="text-slate-400 text-xs truncate">{id}</p>
                   </div>
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={checked}
-                      onChange={() => toggle(g.id)}
+                      onChange={() => toggle(id)}
                       className="h-4 w-4 accent-slate-300"
                     />
                     <span className="text-slate-300 text-sm">{checked ? "On duty" : "Off"}</span>

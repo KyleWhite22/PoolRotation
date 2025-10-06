@@ -303,37 +303,43 @@ export default function PoolMap({
       })}
 
       {/* Legend (compact) */}
-      <g transform={`translate(${VIEWBOX.x + 10} ${VIEWBOX.y + 20})`}>
-        <text x={0} y={0} fontSize="10" fill="#f1f5f9" fontWeight="bold">
-          Legend
-        </text>
-        <foreignObject x={0} y={6} width={140} height={16}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              whiteSpace: "nowrap",
-              fontSize: 9,
-              color: "#f1f5f9",
-              lineHeight: 1,
-              margin: 0,
-              padding: 0,
-              gap: 6,
-            }}
-          >
-            <span
-              style={{
-                textDecoration: "underline",
-                textDecorationColor: "#facc15",
-                textUnderlineOffset: 2,
-              }}
-            >
-              GuardName
-            </span>
-            <span>= &lt;16 yrs old</span>
-            
-          </div>
-        </foreignObject>
+     <g transform={`translate(${VIEWBOX.x + 10} ${VIEWBOX.y + 20})`}>
+  <text x={0} y={0} fontSize="10" fill="#f1f5f9" fontWeight="bold">
+    Legend
+  </text>
+
+  {/* Rows 1–2 inside a foreignObject for styled text */}
+  <foreignObject x={0} y={6} width={200} height={48}>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        fontSize: 9,
+        color: "#f1f5f9",
+        lineHeight: 1,
+        margin: 0,
+        padding: 0,
+      }}
+    >
+      {/* Row 1: Minor underline */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+        <span
+          style={{
+            textDecoration: "underline",
+            textDecorationColor: "#facc15",
+            textUnderlineOffset: 2,
+          }}
+        >
+          GuardName
+        </span>
+        <span>= &lt;16 yrs old</span>
+      </div>
+
+      {/* Row 2: Section anchor */}
+      
+    </div>
+  </foreignObject>
         <g transform="translate(0 26)">
           <rect x={0} y={0} width={12} height={12} stroke="#dc2626" strokeWidth={1.5} fill="none" rx={2} />
           <text x={16} y={9} fontSize="9" fill="#f1f5f9">
