@@ -43,38 +43,68 @@ export const POSITIONS: Position[] = [
   { id: "1.2", label: "1.2", x: 200, y: 305 },
   { id: "1.3", label: "1.3", x: 155, y: 305 },
 
+  { id: "2.1", label: "lazyRiverTop1", x: 530, y: 30 },
+  { id: "2.2", label: "lazyRiverTop2", x: 630, y: 30 },
 
-  { id: "2.1", label: "2.1", x: 275, y: 250 },
-  { id: "2.2", label: "2.2", x: 270, y: 175 },
-  { id: "2.3", label: "2.3", x: 190, y: 185 },
+  { id: "3.1", label: "3.1", x: 275, y: 250 },
+  { id: "3.2", label: "3.2", x: 270, y: 175 },
+  { id: "3.3", label: "3.3", x: 190, y: 185 },
 
-  { id: "3.1", label: "3.1", x: 95, y: 355 },
-  { id: "3.2", label: "3.2", x: 40, y: 300 },
-  { id: "3.3", label: "3.3", x: 40, y: 230},
+  { id: "4.1", label: "bigSlidePoolLeft1", x: 340, y: 120 },
+  { id: "4.2", label: "bigSlidePoolLeft2", x: 335, y: 75 },
 
-  { id: "4.1", label: "MainPoolSlide", x: 95, y: 195 },
-  { id: "4.2", label: "MainPoolSlide.2", x: 95, y: 230 },
-
-   { id: "5.1", label: "bigSlidePoolLeft1", x: 340, y: 120 },
-  { id: "5.2", label: "bigSlidePoolLeft2", x: 335, y: 75 },
+  { id: "5.1", label: "5.1", x: 95, y: 355 },
+  { id: "5.2", label: "5.2", x: 40, y: 300 },
+  { id: "5.3", label: "5.3", x: 40, y: 230},
 
    { id: "6.1", label: "bigSlidePoolMiddle1", x: 380, y: 105 },
   { id: "6.2", label: "bigSlidePoolMiddle2", x: 380, y: 70 },
 
-  //{ id: "9.1", label: "bigSlidePoolRight1", x: 470, y: 105 },
-  //{ id: "9.2", label: "bigSlidePoolRight2", x: 470, y: 70 },
+  { id: "7.1", label: "MainPoolSlide", x: 95, y: 195 },
+  { id: "7.2", label: "MainPoolSlide.2", x: 95, y: 230 },
+
+  { id: "8.1", label: "WaterPark1", x: 450, y: 400 },
+  { id: "8.2", label: "WaterPark2", x: 560, y: 360 },
+    { id: "8.3", label: "WaterPark3", x: 450, y: 350 },
+
+ { id: "9.1", label: "bigSlidePoolRight1", x: 470, y: 105 },
+  { id: "9.2", label: "bigSlidePoolRight2", x: 470, y: 70 },
+
+   { id: "10.1", label: "lazyRiverBottom1", x: 565, y: 190 },
+  { id: "10.2", label: "lazyRiverBottom2", x: 520, y: 200 },
+  { id: "10.3", label: "lazyRiverBottom3", x: 645, y: 250 },
+
+  { id: "11.1", label: "lapPool1", x:400, y: 270 },
+  { id: "11.2", label: "lapPool2", x: 400, y: 165 },
 ];
 
 export const EDGES: Edge[] = [
   { from: "1.1", to: "1.2" },
   { from: "1.2", to: "1.3" },
+
   { from: "2.1", to: "2.2" },
-  { from: "2.2", to: "2.3" },
+ 
   { from: "3.1", to: "3.2" },
   { from: "3.2", to: "3.3" },
-  { from: "4.1", to: "4.2" },
-  { from: "5.1", to: "5.2" },
- { from: "6.1", to: "6.2" },
+
+   { from: "4.1", to: "4.2" },
+
+   { from: "5.1", to: "5.2" },
+   { from: "5.2", to: "5.3" },
+
+   { from: "6.1", to: "6.2" },
+
+  { from: "7.1", to: "7.2" },
+
+   { from: "8.1", to: "8.2" },
+    { from: "8.2", to: "8.3" },
+
+  { from: "9.1", to: "9.2" },
+
+  { from: "10.1", to: "10.2" },
+    { from: "10.2", to: "10.3" },
+
+      { from: "11.1", to: "11.2" },
 ];
 
 export const VIEWBOX = { x: 0, y: 0, width: 708, height: 429.33334 };
@@ -164,8 +194,16 @@ export const POOL_SHAPES: PoolShape[] = [
 
 // Section rest-chair mapping (optional per your rotation logic)
 export const REST_BY_SECTION: Record<string, string | null> = {
-  "1": "1.3",
-  "2": "2.2",
-  "3": "3.1",
-  "4": null, // section 4 has no rest chair
+  "1": "1.2",
+  "2": "2.1",
+  "3": "3.2",
+  "4": "4.1", 
+  "5": "5.1", 
+  "6": "6.1", 
+  "7": null,
+  "8": "8.3", 
+  "9": "9.1", 
+  "10": "10.1", 
+  "11": "11.1", 
+
 };
