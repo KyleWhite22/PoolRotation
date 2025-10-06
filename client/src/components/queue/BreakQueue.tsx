@@ -249,7 +249,7 @@ export default function BreakQueue({
   setDragOverSec(null);
 }}
   >
-    Drop here
+    empty
   </div>
 )}
               </div>

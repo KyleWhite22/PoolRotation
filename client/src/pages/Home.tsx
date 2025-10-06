@@ -146,30 +146,91 @@ function OnDutyBench({
   title = "On-duty (unassigned)",
   onDropGuardToBench,
 }: {
-  guards: Guard[];
+  guards: { id: string; name: string }[];
   title?: string;
   onDropGuardToBench: (guardId: string, e: React.DragEvent) => void;
 }) {
+  const [zoneActive, setZoneActive] = useState(false);
+  const [dragDepth, setDragDepth] = useState(0);
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragDepth((d) => d + 1);
+    setZoneActive(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragDepth((d) => {
+      const next = d - 1;
+      if (next <= 0) {
+        setZoneActive(false);
+        return 0;
+      }
+      return next;
+    });
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const gid =
+      e.dataTransfer.getData("application/x-guard-id") ||
+      e.dataTransfer.getData("text/plain");
+    setZoneActive(false);
+    setDragDepth(0);
+    if (!gid) return;
+    onDropGuardToBench(gid.trim(), e);
+  };
+
   return (
-    <section
-      className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md"
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={(e) => {
-        e.preventDefault();
-        const gid =
-          e.dataTransfer.getData("application/x-guard-id") ||
-          e.dataTransfer.getData("text/plain");
-        if (gid) onDropGuardToBench(gid.trim(), e);
-      }}
-    >
+    <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md">
       <header className="p-4 border-b border-slate-700 flex items-center justify-between">
         <h3 className="text-slate-100 font-semibold">{title}</h3>
         <span className="text-xs text-slate-400">{guards.length}</span>
       </header>
 
-      <div className="p-3">
+      {/* Dedicated visual drop zone */}
+      <div
+        className={[
+          "m-3 rounded-xl border-2 border-dashed px-3 py-4 text-sm transition-colors",
+          zoneActive
+            ? "border-sky-400 bg-sky-400/10 text-sky-200"
+            : "border-slate-600 bg-slate-800/30 text-slate-300",
+        ].join(" ")}
+        role="button"
+        aria-label="Drop here to send a guard to the bench"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div className="flex items-center justify-center gap-2 pointer-events-none select-none">
+          <svg width="16" height="16" viewBox="0 0 24 24" className="shrink-0">
+            <path
+              d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          <span>
+            Drop guards here
+          </span>
+        </div>
+      </div>
+
+      <div className="p-3 pt-0">
         {guards.length === 0 ? (
-          <p className="text-sm text-slate-400 px-1 py-2">No on-duty guards waiting.</p>
+          <p className="text-sm text-slate-400 px-1 py-2">
+            No on-duty guards waiting.
+          </p>
         ) : (
           <ul className="flex flex-wrap gap-2">
             {guards.map((g) => (
@@ -191,7 +252,10 @@ function OnDutyBench({
             ))}
           </ul>
         )}
-        <p className="mt-2 text-xs text-slate-500">Drag a chip to a seat or a section queue. Drop here to unseat/unqueue.</p>
+        <p className="mt-2 text-xs text-slate-500">
+          Drag a chip to a seat or a section queue. Or drop <em>any</em> chip
+          into the box above to bench it.
+        </p>
       </div>
     </section>
   );
@@ -210,15 +274,34 @@ function SimClock({
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <div>
-      <div className="text-2xl font-bold text-slate-100 leading-tight">{timeStr}</div>
-      <button
-        onClick={onRotate}
-        disabled={disabled}
-        className="mt-2 w-full px-3 py-1.5 rounded-lg bg-pool-500 hover:bg-pool-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-900 text-sm font-semibold"
-      >
-        Rotate
-      </button>
-    </div>
+  {/* soft glow */}
+  <div
+    aria-hidden
+    className="pointer-events-none absolute inset-0 rounded-2xl bg-pool-500/10 blur-xl opacity-20"
+  />
+  <div
+    className="text-5xl md:text-4xl font-extrabold text-slate-100 leading-none drop-shadow-sm"
+    aria-live="polite"
+  >
+    {timeStr}
+  </div>
+
+  <button
+    onClick={onRotate}
+    disabled={disabled}
+    className="mt-4 w-full inline-flex items-center justify-center gap-2 px-2 py-3 rounded-xl bg-pool-500 hover:bg-pool-400 active:bg-pool-400 text-slate-900 text-lg font-semibold
+               focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-pool-300
+               disabled:opacity-60 disabled:cursor-not-allowed"
+    title="Advance 15 minutes"
+  >
+    {/* rotate icon */}
+    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 5v4l3-3M21 12a9 9 0 10-3.3 6.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+    Rotate +15 min
+  </button>
+</div>
+
   );
 }
 

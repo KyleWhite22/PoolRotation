@@ -15,13 +15,34 @@ export type Edge = {
 export const POSITIONS: Position[] = [
   //{ id: "1.1", label: "1.1", x: 190, y: 165 },
   //+60 +145
-    { id: "1.1", label: "1.1", x: 245, y: 305 },
+   /* { id: "1.1", label: "1.1", x: 245, y: 305 },
   { id: "1.2", label: "1.2", x: 200, y: 305 },
   { id: "1.3", label: "1.3", x: 155, y: 305 },
-/*
-  { id: "2.1", label: "TopOfRiver1", x: 530, y: 30},
-  { id: "2.2", label: "TopOfRiver2", x: 630, y: 30},
-*/
+
+
+  { id: "2.1", label: "2.1", x: 275, y: 250 },
+  { id: "2.2", label: "2.2", x: 270, y: 175 },
+  { id: "2.3", label: "2.3", x: 190, y: 185 },
+
+  { id: "3.1", label: "3.1", x: 95, y: 355 },
+  { id: "3.2", label: "3.2", x: 40, y: 300 },
+  { id: "3.3", label: "3.3", x: 40, y: 230},
+
+  { id: "4.1", label: "MainPoolSlide", x: 95, y: 195 },
+  { id: "4.2", label: "MainPoolSlide.2", x: 95, y: 230 },
+
+   { id: "5.1", label: "bigSlidePoolLeft1", x: 340, y: 120 },
+  { id: "5.2", label: "bigSlidePoolLeft2", x: 335, y: 75 },
+
+   { id: "6.1", label: "bigSlidePoolMiddle1", x: 380, y: 105 },
+  { id: "6.2", label: "bigSlidePoolMiddle2", x: 380, y: 70 },
+
+
+  */
+  { id: "1.1", label: "1.1", x: 245, y: 305 },
+  { id: "1.2", label: "1.2", x: 200, y: 305 },
+  { id: "1.3", label: "1.3", x: 155, y: 305 },
+
 
   { id: "2.1", label: "2.1", x: 275, y: 250 },
   { id: "2.2", label: "2.2", x: 270, y: 175 },
@@ -42,8 +63,6 @@ export const POSITIONS: Position[] = [
 
   //{ id: "9.1", label: "bigSlidePoolRight1", x: 470, y: 105 },
   //{ id: "9.2", label: "bigSlidePoolRight2", x: 470, y: 70 },
-  
-
 ];
 
 export const EDGES: Edge[] = [
