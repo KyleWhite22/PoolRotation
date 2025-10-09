@@ -143,13 +143,13 @@ function tickAdultSwim(
       const gid = assignedBefore[seat];
       if (!gid) continue;
 
-      if (seat === lastSeat) {
-        // Last seat → NEXT section with +1 tick credit
+       if (seat === lastSeat) {
+        // Last seat → NEXT section with +2 tick credit (stay in break queue for two ticks)
         const nxt = nextSectionId(s);
         toAddToQueue.push({
           guardId: gid,
           returnTo: nxt,
-          enteredTick: currentTick + 1,
+          enteredTick: currentTick + 2,
         });
       } else {
         // Non-last seats → CURRENT section (no credit)
@@ -222,22 +222,22 @@ export function computeNext(
 
   // Normalize incoming queue rows (clamp future ticks; ignore bad sections)
   for (const raw of queue) {
-    const sec = String(raw?.returnTo ?? "");
-    const gid = String(raw?.guardId ?? "");
-    const etRaw = (raw as any)?.enteredTick;
+  const sec = String(raw?.returnTo ?? "");
+  const gid = String(raw?.guardId ?? "");
+  const etRaw = (raw as any)?.enteredTick;
 
-    let et =
-      typeof etRaw === "number" && Number.isFinite(etRaw)
-        ? Math.trunc(etRaw)
-        : typeof etRaw === "string" && /^\d+$/.test(etRaw)
-        ? Math.trunc(parseInt(etRaw, 10))
-        : currentTick;
+  const et =
+    typeof etRaw === "number" && Number.isFinite(etRaw)
+      ? Math.trunc(etRaw)
+      : typeof etRaw === "string" && /^\d+$/.test(etRaw)
+      ? Math.trunc(parseInt(etRaw, 10))
+      : currentTick;
+  // NOTE: no clamping here
 
-    if (et > currentTick) et = currentTick; // clamp future-dated
+  if (!gid || !SECTIONS.includes(sec)) continue;
+  (qBuckets[sec] ?? (qBuckets[sec] = [])).push({ guardId: gid, returnTo: sec, enteredTick: et });
+}
 
-    if (!gid || !SECTIONS.includes(sec)) continue;
-    (qBuckets[sec] ?? (qBuckets[sec] = [])).push({ guardId: gid, returnTo: sec, enteredTick: et });
-  }
 
   // --- ADULT SWIM FRAME ---
   if (adult) {
@@ -284,6 +284,7 @@ export function computeNext(
     const prevISO = new Date(Date.parse(nowISO) - 15 * 60 * 1000).toISOString();
     return isAdultSwimFromISO(prevISO);
   })();
+  const prevTick = currentTick - 1;
 
   // Snapshot of current seats (last frame)
   const assignedStart: Assigned = Object.fromEntries(
@@ -393,21 +394,39 @@ export function computeNext(
     const bucket = qBuckets[s];
 
     if (prevWasAdult) {
-      // POST-ADULT: fill seats[1..end] first, then entry last
-      const entrySeat = seats[0];
+     const entrySeat = seats[0];
 
+      // 3a) advance carryovers first (enteredTick === currentTick)
       for (let i = 1; i < seats.length; i++) {
-        const seat = seats[i];
-        if (nextAssigned[seat]) continue;
-        const idx = bucket.findIndex((e) => isEligNow(e, currentTick, seatedThisTick));
+        const seatId = seats[i];
+        if (nextAssigned[seatId]) continue;
+        const idx = bucket.findIndex(
+  (e) => e.returnTo === s && e.enteredTick === prevTick && !seatedThisTick.has(e.guardId)
+);
         if (idx === -1) break;
         const [entry] = bucket.splice(idx, 1);
-        nextAssigned[seat] = entry.guardId;
+        nextAssigned[seatId] = entry.guardId;
         seatedThisTick.add(entry.guardId);
       }
 
+      // 3b) fill remaining non-entry seats with any other eligible entries
+      for (let i = 1; i < seats.length; i++) {
+        const seatId = seats[i];
+        if (nextAssigned[seatId]) continue;
+        const idx = bucket.findIndex(
+          (e) => e.returnTo === s && e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId)
+        );
+        if (idx === -1) continue;
+        const [entry] = bucket.splice(idx, 1);
+        nextAssigned[seatId] = entry.guardId;
+        seatedThisTick.add(entry.guardId);
+      }
+
+      // 3c) fallback: if no rest returner occupied entry, allow queue to fill entry
       if (!nextAssigned[entrySeat]) {
-        const idx0 = bucket.findIndex((e) => isEligNow(e, currentTick, seatedThisTick));
+        const idx0 = bucket.findIndex(
+          (e) => e.returnTo === s && e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId)
+        );
         if (idx0 !== -1) {
           const [entry] = bucket.splice(idx0, 1);
           nextAssigned[entrySeat] = entry.guardId;
@@ -418,7 +437,9 @@ export function computeNext(
       // ORDINARY: fill entry only
       const entrySeat = seats[0];
       if (!nextAssigned[entrySeat]) {
-        const idx = bucket.findIndex((e) => isEligNow(e, currentTick, seatedThisTick));
+        const idx = bucket.findIndex(
+          (e) => e.returnTo === s && e.enteredTick <= currentTick && !seatedThisTick.has(e.guardId)
+        );
         if (idx !== -1) {
           const [entry] = bucket.splice(idx, 1);
           nextAssigned[entrySeat] = entry.guardId;

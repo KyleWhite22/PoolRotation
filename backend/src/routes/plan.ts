@@ -129,7 +129,7 @@ function sanitizeQueue(
     if (!SECTIONS.includes(sec)) continue;
 
     const tickRaw = coerceTick((raw as any)?.enteredTick);
-    const tick = typeof currentTick === "number" ? Math.min(tickRaw, currentTick) : tickRaw;
+     const tick = tickRaw;
 
     if (idxByGuard.has(gid)) {
       const i = idxByGuard.get(gid)!;
