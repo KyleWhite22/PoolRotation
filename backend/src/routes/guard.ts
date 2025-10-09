@@ -15,6 +15,42 @@ import { GuardCreate, GuardUpdate } from "../schema.js";
 
 const router = Router();
 
+type GuardItem = {
+  pk: string;               // "GUARD#<id>"
+  sk: "METADATA";
+  type: "Guard";
+  id?: string;              // convenience mirror (optional)
+  name?: string;
+  dob?: string | null;
+  phone?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+type GuardOut = {
+  id: string;
+  name: string;
+  dob: string | null;
+  phone: string | null;
+};
+
+const norm = (s: string) =>
+  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+const idFromPk = (pk?: string | null): string | null =>
+  typeof pk === "string" && pk.startsWith("GUARD#") ? pk.slice(6) : null;
+
+const toOut = (it: Partial<GuardItem>): GuardOut | null => {
+  const id = idFromPk(it.pk ?? null) || (typeof it.id === "string" ? it.id : "");
+  if (!id) return null;
+  return {
+    id,
+    name: String(it.name ?? ""),
+    dob: (it.dob ?? null) as string | null,
+    phone: (it.phone ?? null) as string | null,
+  };
+};
+
 /** Scan all pages helper (DynamoDB Scan is limited to 1MB per call). */
 async function scanAll(params: ScanCommandInput): Promise<any[]> {
   const items: any[] = [];
@@ -29,43 +65,31 @@ async function scanAll(params: ScanCommandInput): Promise<any[]> {
   return items;
 }
 
-// ------- list guards -------
+/* ----------------------- LIST (all) ----------------------- */
 router.get("/", async (_req: Request, res: Response) => {
   try {
-    // Only METADATA rows of type Guard; ignore any other rows with the same pk
     const items = await scanAll({
       TableName: TABLE,
-      FilterExpression:
-        "begins_with(pk, :p) AND #sk = :sk AND #type = :t",
+      FilterExpression: "begins_with(#pk, :p) AND #sk = :sk AND #type = :t",
+      ExpressionAttributeNames: {
+        "#pk": "pk",
+        "#sk": "sk",
+        "#type": "type",
+        "#name": "name",
+        "#dob": "dob",
+        "#phone": "phone",
+        "#id": "id",
+      },
       ExpressionAttributeValues: {
         ":p": "GUARD#",
         ":sk": "METADATA",
         ":t": "Guard",
       },
-      ExpressionAttributeNames: {
-        "#sk": "sk",
-        "#type": "type",
-        "#pk": "pk",
-        "#name": "name",
-        "#dob": "dob",
-        "#phone": "phone",
-      },
-      ProjectionExpression: "#pk, #sk, #type, #name, #dob, #phone",
+      ProjectionExpression: "#pk, #sk, #type, #id, #name, #dob, #phone",
       ConsistentRead: true,
     });
 
-    const guards = items
-      .map((it: any) => ({
-        id:
-          typeof it.pk === "string" && it.pk.startsWith("GUARD#")
-            ? it.pk.slice(6)
-            : String(it.id ?? ""),
-        name: String(it.name ?? ""),
-        dob: it.dob ?? null,
-        phone: it.phone ?? null,
-      }))
-      .filter((g) => g.id);
-
+    const guards = items.map(toOut).filter(Boolean) as GuardOut[];
     res.set("Cache-Control", "no-store");
     res.json(guards);
   } catch (err) {
@@ -74,18 +98,47 @@ router.get("/", async (_req: Request, res: Response) => {
   }
 });
 
-// ------- create guard -------
+/* -------- OPTIONAL: name/id maps for canonicalization ------- */
+router.get("/map", async (_req: Request, res: Response) => {
+  try {
+    const items = await scanAll({
+      TableName: TABLE,
+      FilterExpression: "begins_with(#pk, :p) AND #sk = :sk AND #type = :t",
+      ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#type": "type", "#name": "name", "#id": "id" },
+      ExpressionAttributeValues: { ":p": "GUARD#", ":sk": "METADATA", ":t": "Guard" },
+      ProjectionExpression: "#pk, #sk, #type, #id, #name",
+      ConsistentRead: true,
+    });
+
+    const idToName: Record<string, string> = {};
+    const nameToId: Record<string, string> = {};
+    for (const it of items) {
+      const id = idFromPk(it.pk) || it.id;
+      if (!id) continue;
+      const name = String(it.name ?? "");
+      idToName[id] = name;
+      if (name) nameToId[norm(name)] = id;
+    }
+    res.set("Cache-Control", "no-store");
+    res.json({ idToName, nameToId });
+  } catch (err) {
+    console.error("GET /api/guards/map error:", err);
+    res.status(500).json({ error: "Failed to build map" });
+  }
+});
+
+/* ----------------------- CREATE ----------------------- */
 router.post("/", async (req: Request, res: Response) => {
   try {
     const parsed = GuardCreate.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-    const id = crypto.randomUUID();
-    const item = {
+    const id = crypto.randomUUID(); // canonical identity
+    const item: GuardItem = {
       pk: `GUARD#${id}`,
       sk: "METADATA",
       type: "Guard",
-      id, // convenience mirror
+      id, // mirror for convenience
       name: parsed.data.name.trim(),
       dob: parsed.data.dob ?? null,
       phone: parsed.data.phone ?? null,
@@ -100,22 +153,55 @@ router.post("/", async (req: Request, res: Response) => {
       })
     );
 
-    res.status(201).json({ id, name: item.name, dob: item.dob, phone: item.phone });
+    res.status(201).json(toOut(item));
   } catch (err: any) {
     if (err?.name === "ConditionalCheckFailedException") {
       return res.status(409).json({ error: "guard id already exists" });
     }
     console.error("POST /api/guards error:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to create guard", detail: err?.message || String(err) });
+    res.status(500).json({ error: "Failed to create guard", detail: err?.message || String(err) });
   }
 });
 
-// ------- update guard -------
+/* ----------------------- READ (single) ----------------------- */
+router.get("/:id", async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id.trim();
+    const items = await scanAll({
+      TableName: TABLE,
+      FilterExpression: "#pk = :pk AND #sk = :sk AND #type = :t",
+      ExpressionAttributeNames: {
+        "#pk": "pk",
+        "#sk": "sk",
+        "#type": "type",
+        "#name": "name",
+        "#dob": "dob",
+        "#phone": "phone",
+        "#id": "id",
+      },
+      ExpressionAttributeValues: {
+        ":pk": `GUARD#${id}`,
+        ":sk": "METADATA",
+        ":t": "Guard",
+      },
+      ProjectionExpression: "#pk, #sk, #type, #id, #name, #dob, #phone",
+      ConsistentRead: true,
+    });
+
+    const out = items.map(toOut).find(Boolean);
+    if (!out) return res.status(404).json({ error: "Guard not found" });
+    res.set("Cache-Control", "no-store");
+    res.json(out);
+  } catch (err) {
+    console.error("GET /api/guards/:id error:", err);
+    res.status(500).json({ error: "Failed to read guard" });
+  }
+});
+
+/* ----------------------- UPDATE ----------------------- */
 router.put("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id;
+    const id = req.params.id.trim();
     const parsed = GuardUpdate.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(parsed.error.flatten());
     const { name, dob, phone } = parsed.data;
@@ -138,24 +224,18 @@ router.put("/:id", async (req: Request, res: Response) => {
       removes.push(n);
     };
 
-    if (typeof name !== "undefined") setAttr("name", name);
-    if (typeof dob !== "undefined") {
-      if (dob === null) removeAttr("dob");
-      else setAttr("dob", dob);
-    }
-    if (typeof phone !== "undefined") {
-      if (phone === null) removeAttr("phone");
-      else setAttr("phone", phone);
-    }
+    if (typeof name !== "undefined") setAttr("name", String(name).trim());
+    if (typeof dob !== "undefined") (dob === null ? removeAttr("dob") : setAttr("dob", dob));
+    if (typeof phone !== "undefined") (phone === null ? removeAttr("phone") : setAttr("phone", phone));
+    setAttr("updatedAt", new Date().toISOString());
 
-    if (sets.length === 0 && removes.length === 0) {
+    if (!sets.length && !removes.length) {
       return res.status(400).json({ error: "No changes provided" });
     }
 
-    const parts = [];
-    if (sets.length) parts.push("SET " + sets.join(", "));
-    if (removes.length) parts.push("REMOVE " + removes.join(", "));
-    const UpdateExpression = parts.join(" ");
+    const UpdateExpression =
+      (sets.length ? "SET " + sets.join(", ") : "") +
+      (removes.length ? (sets.length ? " " : "") + "REMOVE " + removes.join(", ") : "");
 
     const result = await ddb.send(
       new UpdateCommand({
@@ -169,7 +249,9 @@ router.put("/:id", async (req: Request, res: Response) => {
       })
     );
 
-    res.json({ id, ...result.Attributes });
+    const out = toOut(result.Attributes as GuardItem);
+    if (!out) return res.status(500).json({ error: "Corrupt guard row" });
+    res.json(out);
   } catch (err: any) {
     if (err?.name === "ConditionalCheckFailedException") {
       return res.status(404).json({ error: "Guard not found" });
@@ -179,17 +261,21 @@ router.put("/:id", async (req: Request, res: Response) => {
   }
 });
 
-// ------- delete guard -------
+/* ----------------------- DELETE ----------------------- */
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
     await ddb.send(
       new DeleteCommand({
         TableName: TABLE,
-        Key: { pk: `GUARD#${req.params.id}`, sk: "METADATA" },
+        Key: { pk: `GUARD#${req.params.id.trim()}`, sk: "METADATA" },
+        ConditionExpression: "attribute_exists(pk)",
       })
     );
     res.json({ ok: true });
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === "ConditionalCheckFailedException") {
+      return res.status(404).json({ error: "Guard not found" });
+    }
     console.error("DELETE /api/guards/:id error:", err);
     res.status(500).json({ error: "Failed to delete guard" });
   }

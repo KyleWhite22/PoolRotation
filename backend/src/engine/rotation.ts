@@ -84,18 +84,44 @@ function isAdultSwimFromISO(nowISO: string): boolean {
   return minuteOfHourNY(nowISO) === 45;
 }
 
-// -------- eligibility helpers (declare BEFORE use) --------
+// -------- eligibility helpers --------
 const isEligibleAtOrSame = (entry: QueueEntry, tick: number) => entry.enteredTick <= tick;
-// Treat same-tick arrivals as eligible for seating (used for ALL seating pulls).
 const isEligNow = (e: QueueEntry, tick: number, seatedThisTick: Set<string>) =>
   e.enteredTick <= tick && !seatedThisTick.has(e.guardId);
 
+// -------- validation helper --------
+function validateNoGuardLoss(
+  beforeSeated: string[],
+  beforeQueued: string[],
+  afterSeated: string[],
+  afterQueued: string[],
+  context: string
+) {
+  const beforeTotal = new Set([...beforeSeated, ...beforeQueued]);
+  const afterTotal = new Set([...afterSeated, ...afterQueued]);
+
+  const lost = [...beforeTotal].filter((id) => !afterTotal.has(id));
+  const gained = [...afterTotal].filter((id) => !beforeTotal.has(id));
+
+  if (lost.length > 0) {
+    console.error(`[${context}] GUARDS LOST:`, lost);
+  }
+  if (gained.length > 0) {
+    console.warn(`[${context}] GUARDS GAINED:`, gained);
+  }
+  if (afterTotal.size !== beforeTotal.size) {
+    console.error(`[${context}] Total count mismatch: ${beforeTotal.size} → ${afterTotal.size}`);
+  }
+
+  return lost.length === 0 && gained.length === 0;
+}
+
 /**
  * Adult-swim (:45) step:
- * - Clear seats;
- * - Last-seat guards → NEXT section with +2 ticks (30 min) credit;
- * - Others → CURRENT section queue (enteredTick = currentTick);
- * - If a section has a rest chair, seat the next eligible (<= currentTick) into it.
+ * - Clear seats
+ * - Last-seat guards → NEXT section with +1 tick (15 min) credit
+ * - Others → CURRENT section queue (enteredTick = currentTick)
+ * - Seat next eligible into rest chairs
  */
 function tickAdultSwim(
   assignedBefore: Assigned,
@@ -106,31 +132,61 @@ function tickAdultSwim(
     POSITIONS.map((p) => [p.id, null as string | null])
   );
 
+  // Collect new queue entries first (don't mutate buckets while reading)
+  const toAddToQueue: QueueEntry[] = [];
+
   for (const s of SECTIONS) {
     const seats = seatsBySection[s];
     const lastSeat = seats[seats.length - 1];
 
-    // push in seat order to preserve left→right
     for (const seat of seats) {
       const gid = assignedBefore[seat];
       if (!gid) continue;
 
       if (seat === lastSeat) {
+        // Last seat → NEXT section with +1 tick credit
         const nxt = nextSectionId(s);
-        qBuckets[nxt].push({ guardId: gid, returnTo: nxt, enteredTick: currentTick + 2 });
+        toAddToQueue.push({
+          guardId: gid,
+          returnTo: nxt,
+          enteredTick: currentTick + 1,
+        });
       } else {
-        qBuckets[s].push({ guardId: gid, returnTo: s, enteredTick: currentTick });
+        // Non-last seats → CURRENT section (no credit)
+        toAddToQueue.push({
+          guardId: gid,
+          returnTo: s,
+          enteredTick: currentTick,
+        });
       }
     }
   }
 
+  // Apply queue additions (dedupe guard globally to last write)
+  const lastIndex: Map<string, number> = new Map();
+  toAddToQueue.forEach((e, i) => lastIndex.set(e.guardId, i));
+  for (let i = 0; i < toAddToQueue.length; i++) {
+    if (lastIndex.get(toAddToQueue[i].guardId) !== i) continue; // keep only last
+    // Remove this guard from ALL sections first
+    for (const s of SECTIONS) {
+      qBuckets[s] = (qBuckets[s] ?? []).filter((q) => q.guardId !== toAddToQueue[i].guardId);
+    }
+    (qBuckets[toAddToQueue[i].returnTo] ?? (qBuckets[toAddToQueue[i].returnTo] = [])).push(
+      toAddToQueue[i]
+    );
+  }
+
+  // Seat guards at rest chairs from queues
   const seatedAtRest = new Set<string>();
   for (const s of SECTIONS) {
     const restSeat = restChairBySection[s];
     if (!restSeat) continue;
 
     const bucket = qBuckets[s];
-    const idx = bucket.findIndex((e) => isEligibleAtOrSame(e, currentTick)); // <= currentTick
+    const idx = bucket.findIndex(
+      (e) => e.enteredTick <= currentTick && !seatedAtRest.has(e.guardId)
+    );
+
     if (idx !== -1) {
       const [entry] = bucket.splice(idx, 1);
       nextAssigned[restSeat] = entry.guardId;
@@ -142,44 +198,52 @@ function tickAdultSwim(
 }
 
 // ---------------- core stepper ----------------
-export function computeNext({
-  assigned,
-  guards, // reserved for future rules
-  breaks,
-  queue = [],
-  nowISO,
-}: {
-  assigned: Assigned;
-  guards: Guard[];
-  breaks: BreakState;
-  queue?: QueueEntry[];
-  nowISO: string;
-}): EngineOutput {
+export function computeNext(
+  {
+    assigned,
+    guards,
+    breaks,
+    queue = [],
+    nowISO,
+  }: {
+    assigned: Assigned;
+    guards: Guard[];
+    breaks: BreakState;
+    queue?: QueueEntry[];
+    nowISO: string;
+  }
+): EngineOutput {
   const currentTick = tickIndexFromISO(nowISO);
   const adult = isAdultSwimFromISO(nowISO);
 
-  // Build per-section queues; DO NOT reorder.
+  // Build per-section queues; DO NOT reorder (preserve FIFO within each section)
   const qBuckets: Record<string, QueueEntry[]> = {};
   for (const s of SECTIONS) qBuckets[s] = [];
+
+  // Normalize incoming queue rows (clamp future ticks; ignore bad sections)
   for (const raw of queue) {
     const sec = String(raw?.returnTo ?? "");
     const gid = String(raw?.guardId ?? "");
     const etRaw = (raw as any)?.enteredTick;
-    const et =
+
+    let et =
       typeof etRaw === "number" && Number.isFinite(etRaw)
         ? Math.trunc(etRaw)
         : typeof etRaw === "string" && /^\d+$/.test(etRaw)
         ? Math.trunc(parseInt(etRaw, 10))
         : currentTick;
+
+    if (et > currentTick) et = currentTick; // clamp future-dated
+
     if (!gid || !SECTIONS.includes(sec)) continue;
-    qBuckets[sec].push({ guardId: gid, returnTo: sec, enteredTick: et });
+    (qBuckets[sec] ?? (qBuckets[sec] = [])).push({ guardId: gid, returnTo: sec, enteredTick: et });
   }
 
   // --- ADULT SWIM FRAME ---
   if (adult) {
     const { nextAssigned, seatedAtRest } = tickAdultSwim(assigned, qBuckets, currentTick);
 
-    // Outgoing queue: preserve order, drop those seated at rest.
+    // Outgoing queue: preserve order, drop those seated at rest (dedupe by guard)
     const seen = new Set<string>();
     const queuedOutAdult: QueueEntry[] = [];
     for (const s of SECTIONS) {
@@ -189,6 +253,16 @@ export function computeNext({
         seen.add(q.guardId);
         queuedOutAdult.push(q);
       }
+    }
+
+    // VALIDATION
+    if (process.env.NODE_ENV !== "production") {
+      const beforeSeated = Object.values(assigned).filter(Boolean) as string[];
+      const beforeQueued = queue.map((q) => q.guardId);
+      const afterSeated = Object.values(nextAssigned).filter(Boolean) as string[];
+      const afterQueued = queuedOutAdult.map((q) => q.guardId);
+
+      validateNoGuardLoss(beforeSeated, beforeQueued, afterSeated, afterQueued, "ADULT_SWIM");
     }
 
     return {
@@ -205,7 +279,7 @@ export function computeNext({
   );
   const seatedThisTick = new Set<string>();
 
-  // Did we just come from adult?
+  // Did we just come from adult swim?
   const prevWasAdult = (() => {
     const prevISO = new Date(Date.parse(nowISO) - 15 * 60 * 1000).toISOString();
     return isAdultSwimFromISO(prevISO);
@@ -216,7 +290,7 @@ export function computeNext({
     POSITIONS.map((p) => [p.id, assigned[p.id] ?? null])
   );
 
-  // Pull rest returners off rest seats (so they don't "shift right"); seat to entry later
+  // Pull rest returners off rest seats (so they don't "shift right")
   const restReturners: Record<string, string> = {};
   if (prevWasAdult) {
     for (const s of SECTIONS) {
@@ -231,7 +305,6 @@ export function computeNext({
   }
 
   // 1) End-of-section → enqueue into NEXT section (eligible now)
-  //    NOTE: On post-adult frames, assignedStart[last seats] are null, so this is a no-op there.
   const toEnqueue: Array<{ sec: string; gid: string }> = [];
   for (const seat of Object.keys(assignedStart)) {
     const gid = assignedStart[seat];
@@ -242,11 +315,20 @@ export function computeNext({
       toEnqueue.push({ sec: nextSec, gid });
     }
   }
-  for (const item of toEnqueue) {
-    qBuckets[item.sec].push({ guardId: item.gid, returnTo: item.sec, enteredTick: currentTick });
+  // enqueue (dedupe: keep last write)
+  const lastIdx = new Map<string, number>();
+  toEnqueue.forEach((e, i) => lastIdx.set(e.gid, i));
+  for (let i = 0; i < toEnqueue.length; i++) {
+    if (lastIdx.get(toEnqueue[i].gid) !== i) continue;
+    const e = toEnqueue[i];
+    (qBuckets[e.sec] ?? (qBuckets[e.sec] = [])).push({
+      guardId: e.gid,
+      returnTo: e.sec,
+      enteredTick: currentTick,
+    });
   }
 
-  // 1b) Balance queues ONLY on ordinary frames (never post-adult to preserve order)
+  // 1b) Balance queues ONLY on ordinary frames (never post-adult)
   if (!prevWasAdult) {
     const eligLE = (e: QueueEntry) => e.enteredTick <= currentTick;
     let moved = true;
@@ -294,7 +376,7 @@ export function computeNext({
     }
   }
 
-  // 2b) Seat rest returners (post-adult only): put them on entry seat now
+  // 2b) Seat rest returners (post-adult only)
   if (prevWasAdult) {
     for (const s of SECTIONS) {
       const gid = restReturners[s];
@@ -311,8 +393,7 @@ export function computeNext({
     const bucket = qBuckets[s];
 
     if (prevWasAdult) {
-      // POST-ADULT: fill seats[1..end] first (preserves "k → k+1" mapping),
-      // then fill entry LAST if it’s still empty (unless rest returner took it).
+      // POST-ADULT: fill seats[1..end] first, then entry last
       const entrySeat = seats[0];
 
       for (let i = 1; i < seats.length; i++) {
@@ -334,7 +415,7 @@ export function computeNext({
         }
       }
     } else {
-      // ORDINARY: fill entry only (<= eligibility).
+      // ORDINARY: fill entry only
       const entrySeat = seats[0];
       if (!nextAssigned[entrySeat]) {
         const idx = bucket.findIndex((e) => isEligNow(e, currentTick, seatedThisTick));
@@ -347,7 +428,7 @@ export function computeNext({
     }
   }
 
-  // 3b) Global borrowing ONLY on ordinary frames (never post-adult to keep order)
+  // 3b) Global borrowing ONLY on ordinary frames
   if (!prevWasAdult) {
     type SeatRef = { section: string; seat: string; idx: number };
     const eligLEAndFree = (e: QueueEntry) =>
@@ -376,7 +457,7 @@ export function computeNext({
         const eligIdxs: number[] = [];
         for (let i = 0; i < bucket.length; i++) if (eligLEAndFree(bucket[i])) eligIdxs.push(i);
 
-        const surplus = Math.max(0, eligIdxs.length - 1); // keep 1 eligible for own entry seat
+        const surplus = Math.max(0, eligIdxs.length - 1);
         for (let k = 0; k < surplus; k++) donors.push({ section: s, entry: bucket[eligIdxs[k]] });
       }
 
@@ -398,7 +479,7 @@ export function computeNext({
     }
   }
 
-  // 4) Outgoing queue snapshot (preserve order; exclude newly seated)
+  // 4) Outgoing queue snapshot (preserve order; exclude newly seated; dedupe)
   const outQueue: QueueEntry[] = [];
   const seen = new Set<string>();
   for (const s of SECTIONS) {
@@ -410,19 +491,30 @@ export function computeNext({
     }
   }
 
+  // VALIDATION & DEBUG
   if (process.env.NODE_ENV !== "production") {
+    const beforeSeated = Object.values(assignedStart).filter(Boolean) as string[];
+    const beforeQueued = queue.map((q) => q.guardId);
+    const afterSeated = Object.values(nextAssigned).filter(Boolean) as string[];
+    const afterQueued = outQueue.map((q) => q.guardId);
+
+    validateNoGuardLoss(beforeSeated, beforeQueued, afterSeated, afterQueued, "ALL_AGES");
+
     console.log("[rotation.debug] RESULT", {
       tick: currentTick,
       period: "ALL_AGES",
       assigned: Object.entries(nextAssigned).map(([seat, guard]) => ({ seat, guard: guard ?? "—" })),
       queues: SECTIONS.map((s) => ({
         section: s,
-        queue: qBuckets[s].map((q) => `${q.guardId}(tick:${q.enteredTick})`),
+        queue: (qBuckets[s] ?? []).map((q) => `${q.guardId}(tick:${q.enteredTick})`),
       })),
     });
+
     const seatedIds = new Set(Object.values(nextAssigned).filter(Boolean) as string[]);
     const remaining = SECTIONS.flatMap((s) =>
-      (qBuckets[s] ?? []).map((q) => q.guardId).filter((id) => !seatedIds.has(id))
+      (qBuckets[s] ?? [])
+        .map((q) => q.guardId)
+        .filter((id) => !seatedIds.has(id))
     );
     console.log("[rotation.debug] seated:", Array.from(seatedIds));
     console.log("[rotation.debug] still queued:", remaining);

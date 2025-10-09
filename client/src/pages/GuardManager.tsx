@@ -443,7 +443,10 @@ function AddGuardModal({
         dob: created?.dob ?? (dob || ""),
         phone: created?.phone ?? (phone || ""),
       };
-      onCreated(g);
+      try { new BroadcastChannel("guards").postMessage({ type: "created", guard: g }); } catch {}
+try { window.dispatchEvent(new CustomEvent("guards:created", { detail: g })); } catch {}
+try { localStorage.setItem("guards:invalidate", String(Date.now())); } catch {}
+onCreated(g);
     } catch (e: any) {
       console.error("Failed to create guard:", e);
       alert(e.message || "Failed to create guard. Check console for details.");
