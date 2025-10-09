@@ -7,6 +7,7 @@ import GuardPickerModal from "../components/modals/GuardPickerModal";
 import GuardsListModal from "../components/modals/GuardsListModal";
 import { POSITIONS } from "../../../shared/data/poolLayout.js";
 import type { Guard } from "../lib/types";
+import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
 
 // -------- Local helpers / types --------
 type Assigned = Record<string, string | null>;
@@ -88,6 +89,8 @@ export default function Home() {
   const [guards, setGuards] = useState<Guard[]>([]);
   const [guardsLoaded, setGuardsLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
+const [isRotatingUI, setIsRotatingUI] = useState(false);
+const [isAutofilling, setIsAutofilling] = useState(false);
 
   // --- Rotation state ---
   const [assigned, setAssigned] = useState<Assigned>(() => emptyAssigned());
@@ -652,7 +655,7 @@ void fetchGuards()
   const plus15Minutes = async () => {
     if (rotatingRef.current) return;
     rotatingRef.current = true;
-
+ setIsRotatingUI(true);
     try {
       const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
       setSimulatedNow(newNow);
@@ -710,6 +713,7 @@ void fetchGuards()
       await fetchQueue();
     } finally {
       rotatingRef.current = false;
+      setIsRotatingUI(false); 
     }
   };
 
@@ -728,70 +732,76 @@ void fetchGuards()
     }
   };
 
-  const handleRefreshAll = async () => {
-    const prevDayKey = dayKey;
+  const handleReset = async () => {
+  // 1) Reset clock to 12:00 PM local (same day)
+  const reset = new Date(simulatedNow);
+  reset.setHours(12, 0, 0, 0);
+  setSimulatedNow(reset);
 
-    const reset = new Date(simulatedNow);
-    reset.setHours(12, 0, 0, 0);
-    const nextDayKey = ymdLocal(reset);
+  // 2) Clear assigned seats and queues locally
+  setAssigned(emptyAssigned());
+  setBreakQueue([]);
+  setBreaks({});
+  setConflicts([]);
 
-    setSimulatedNow(reset);
+  // 3) Put *all known guards* on duty (unassigned)
+  //    – benches everyone by leaving assigned empty & queue empty
+  const allIds = guards.map(g => g.id).filter(Boolean);
+  setOnDutyIds(new Set(allIds));
 
-    setOnDutyOpen(false);
-    setOnDutyIds(new Set());
-    setBreakQueue([]); // canonical
-    setAssigned(emptyAssigned());
-    setBreaks({});
-    setConflicts([]);
+  // 4) (Optional but recommended) Clear any per-day localStorage you keep
+  try {
+    localStorage.removeItem(`assigned:${dayKey}`);
+    localStorage.removeItem(`onDuty:${dayKey}`);
+    localStorage.removeItem(`breaks:${dayKey}`);
+    localStorage.removeItem(`snapshot:${dayKey}`); // if you added the unified snapshot
+  } catch {}
 
-    try {
-      for (const k of [prevDayKey, nextDayKey]) {
-        localStorage.removeItem(`breaks:${k}`);
-        localStorage.removeItem(`assigned:${k}`);
-        localStorage.removeItem(`onDuty:${k}`);
-      }
-    } catch {}
+  // 5) (Optional) Tell backend to reflect this reset for the same day
+  //    Comment this whole block out if you want 100% client-only behavior.
+  try {
+    const time = new Date().toISOString().slice(11, 16);
 
-    try {
-      const time = new Date().toISOString().slice(11, 16);
-      await Promise.allSettled([
-        ...POSITIONS.map((p) =>
-          fetch("/api/rotations/slot?v=" + Date.now(), {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-api-key": "dev-key-123",
-              "Cache-Control": "no-store",
-            },
-            body: JSON.stringify({
-              date: nextDayKey,
-              time,
-              stationId: p.id,
-              guardId: null,
-              notes: "refresh-all",
-            }),
-            cache: "no-store" as RequestCache,
-          })
-        ),
-        fetch("/api/plan/queue-clear?v=" + Date.now(), {
+    await Promise.allSettled([
+      // clear every seat to null for today
+      ...POSITIONS.map((p) =>
+        fetch("/api/rotations/slot?v=" + Date.now(), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-api-key": "dev-key-123",
             "Cache-Control": "no-store",
           },
-          body: JSON.stringify({ date: nextDayKey }),
+          body: JSON.stringify({
+            date: ymdLocal(reset),   // today
+            time,                    // current time string HH:MM
+            stationId: p.id,
+            guardId: null,
+            notes: "reset-all",
+          }),
           cache: "no-store" as RequestCache,
-        }),
-      ]);
-    } catch (e) {
-      console.warn("Backend reset failed (continuing):", e);
-    } finally {
-      await Promise.allSettled([fetchAssignments(), fetchQueue()]);
-    }
-  };
+        })
+      ),
+      // clear all queues for today
+      fetch("/api/plan/queue-clear?v=" + Date.now(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": "dev-key-123",
+          "Cache-Control": "no-store",
+        },
+        body: JSON.stringify({ date: ymdLocal(reset) }),
+        cache: "no-store" as RequestCache,
+      }),
+    ]);
+  } catch (e) {
+    console.warn("Backend reset failed (continuing client reset):", e);
+  }
+};
+
 
   const autopopulate = async () => {
+    setIsAutofilling(true);
     try {
       const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id));
       if (allowedIds.length === 0) {
@@ -852,7 +862,9 @@ void fetchGuards()
       }
     } catch (e) {
       console.error("Autopopulate failed:", e);
-    }
+    } finally {
+    setIsAutofilling(false); // NEW
+  }
   };
 
   // util to compute age
@@ -906,7 +918,7 @@ void fetchGuards()
             onPlus15={plus15Minutes}
             onAuto={autopopulate}
             onNewGuard={() => setCreateOpen(true)}
-            onRefresh={handleRefreshAll}
+            onRefresh={handleReset}
             disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
             stamp={""}
           />
@@ -989,6 +1001,9 @@ void fetchGuards()
       />
 
       <GuardsListModal open={listOpen} onClose={() => setListOpen(false)} guards={guards} />
+      {loading && !isRotatingUI && !isAutofilling && <StandardLoading />}
+{isRotatingUI && <RotationLoading />}
+{isAutofilling && <AutofillLoading />}
     </AppShell>
   );
 }
