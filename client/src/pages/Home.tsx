@@ -58,24 +58,19 @@ const deduplicateQueue = (queue: QueueEntry[]): QueueEntry[] => {
   return Array.from(byGuard.values());
 };
 // Persist everything locally for this day
-const SNAP_KEY = (day: string) => `snapshot:${day}`;
 
 type DaySnapshot = {
   assigned: Assigned;
   breakQueue: QueueEntry[];
   breaks: BreakState;
   conflicts: ConflictUI[];
-  onDutyIds: string[];     // store set as array
-  simulatedNowISO: string; // ISO so it’s timezone-safe
+  onDutyIds: string[];
+  simulatedNowISO: string;
 };
-
+const SNAP_KEY = (day: string) => `snapshot:${day}`;
 const loadSnapshot = (day: string): DaySnapshot | null => {
-  try {
-    const raw = localStorage.getItem(SNAP_KEY(day));
-    return raw ? (JSON.parse(raw) as DaySnapshot) : null;
-  } catch {
-    return null;
-  }
+  try { const raw = localStorage.getItem(SNAP_KEY(day)); return raw ? JSON.parse(raw) as DaySnapshot : null; }
+  catch { return null; }
 };
 
 const saveSnapshot = (day: string, s: DaySnapshot) => {
@@ -85,6 +80,16 @@ const saveSnapshot = (day: string, s: DaySnapshot) => {
 };
 
 export default function Home() {
+  // BEFORE any useState:
+const initialSimulatedNow = (() => {
+  const saved = localStorage.getItem("simulatedNowISO");
+  const d = saved ? new Date(saved) : new Date();
+  if (isNaN(d.getTime())) { const now = new Date(); now.setHours(12, 0, 0, 0); return now; }
+  return d;
+})();
+const initialDayKey = ymdLocal(initialSimulatedNow);
+const initialSnap = loadSnapshot(initialDayKey);
+
   // --- Server data ---
   const [guards, setGuards] = useState<Guard[]>([]);
   const [guardsLoaded, setGuardsLoaded] = useState(false);
@@ -118,19 +123,10 @@ const [isAutofilling, setIsAutofilling] = useState(false);
   const SIM_KEY = "simulatedNowISO";
 
   // Start at 12:00 PM today (local)
-  const [simulatedNow, setSimulatedNow] = useState(() => {
-    const saved = localStorage.getItem(SIM_KEY);
-    if (saved) {
-      const d = new Date(saved);
-      if (!isNaN(d.getTime())) return d;
-    }
-    const d = new Date();
-    d.setHours(12, 0, 0, 0);
-    return d;
-  });
-  useEffect(() => {
-    localStorage.setItem(SIM_KEY, simulatedNow.toISOString());
-  }, [simulatedNow]);
+ const [simulatedNow, setSimulatedNow] = useState<Date>(() => {
+  return initialSnap?.simulatedNowISO ? new Date(initialSnap.simulatedNowISO) : initialSimulatedNow;
+});
+useEffect(() => { localStorage.setItem("simulatedNowISO", simulatedNow.toISOString()); }, [simulatedNow]);
 
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
@@ -162,15 +158,13 @@ const [isAutofilling, setIsAutofilling] = useState(false);
   );
 
   // --- On-duty selection (persisted per day) ---
-  const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem(`onDuty:${dayKey}`);
-      const arr = raw ? (JSON.parse(raw) as string[]) : [];
-      return new Set(arr);
-    } catch {
-      return new Set<string>();
-    }
-  });
+const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
+  if (initialSnap?.onDutyIds) return new Set(initialSnap.onDutyIds);
+  try {
+    const raw = localStorage.getItem(`onDuty:${initialDayKey}`);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch { return new Set(); }
+});
   // Persist a full snapshot on any change to core day state
 useEffect(() => {
   if (!allowPersistRef.current) return;
@@ -185,24 +179,14 @@ useEffect(() => {
   saveSnapshot(dayKey, snap);
 }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(`onDuty:${dayKey}`);
-      setOnDutyIds(new Set(raw ? (JSON.parse(raw) as string[]) : []));
-    } catch {
-      setOnDutyIds(new Set());
-    }
-  }, [dayKey]);
-  useEffect(() => {
-    // prune unknown IDs before persisting
-    const pruned = [...onDutyIds]
-      .map((id) => toId(id))
-      .filter((id): id is string => Boolean(id && knownIds.has(id)));
-    if (pruned.length !== onDutyIds.size) setOnDutyIds(new Set(pruned));
-    try {
-      localStorage.setItem(`onDuty:${dayKey}`, JSON.stringify(pruned));
-    } catch {}
-  }, [onDutyIds, dayKey, knownIds, toId]);
+
+ useEffect(() => {
+  if (!guardsLoaded || knownIds.size === 0) return;
+  setOnDutyIds(prev => {
+    const pruned = [...prev].filter(id => knownIds.has(id));
+    return new Set(pruned);
+  });
+}, [guardsLoaded, knownIds]);
 
   // --- Derived ---
   const usedGuardIds = useMemo(
@@ -738,32 +722,41 @@ void fetchGuards()
   reset.setHours(12, 0, 0, 0);
   setSimulatedNow(reset);
 
-  // 2) Clear assigned seats and queues locally
-  setAssigned(emptyAssigned());
-  setBreakQueue([]);
-  setBreaks({});
-  setConflicts([]);
-
-  // 3) Put *all known guards* on duty (unassigned)
-  //    – benches everyone by leaving assigned empty & queue empty
+  // 2) Build the target reset state
   const allIds = guards.map(g => g.id).filter(Boolean);
-  setOnDutyIds(new Set(allIds));
+  const resetAssigned = emptyAssigned();
+  const resetQueue: QueueEntry[] = [];
+  const resetBreaks: BreakState = {};
+  const resetConflicts: ConflictUI[] = [];
+  const resetOnDuty = new Set(allIds);
 
-  // 4) (Optional but recommended) Clear any per-day localStorage you keep
+  // 3) Apply to React state
+  setAssigned(resetAssigned);
+  setBreakQueue(resetQueue);
+  setBreaks(resetBreaks);
+  setConflicts(resetConflicts);
+  setOnDutyIds(resetOnDuty);
+
+  // 4) Persist **immediately** so refresh can’t lose it
+  const day = ymdLocal(reset);
+  const snap: DaySnapshot = {
+    assigned: resetAssigned,
+    breakQueue: resetQueue,
+    breaks: resetBreaks,
+    conflicts: resetConflicts,
+    onDutyIds: [...resetOnDuty],       // Set -> array
+    simulatedNowISO: reset.toISOString(),
+  };
   try {
-    localStorage.removeItem(`assigned:${dayKey}`);
-    localStorage.removeItem(`onDuty:${dayKey}`);
-    localStorage.removeItem(`breaks:${dayKey}`);
-    localStorage.removeItem(`snapshot:${dayKey}`); // if you added the unified snapshot
+    saveSnapshot(day, snap);
+localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // optional legacy
   } catch {}
 
-  // 5) (Optional) Tell backend to reflect this reset for the same day
-  //    Comment this whole block out if you want 100% client-only behavior.
+  // 5) (Optional) tell backend to clear seats & queues for today
   try {
     const time = new Date().toISOString().slice(11, 16);
 
     await Promise.allSettled([
-      // clear every seat to null for today
       ...POSITIONS.map((p) =>
         fetch("/api/rotations/slot?v=" + Date.now(), {
           method: "POST",
@@ -773,8 +766,8 @@ void fetchGuards()
             "Cache-Control": "no-store",
           },
           body: JSON.stringify({
-            date: ymdLocal(reset),   // today
-            time,                    // current time string HH:MM
+            date: day,
+            time,
             stationId: p.id,
             guardId: null,
             notes: "reset-all",
@@ -782,7 +775,6 @@ void fetchGuards()
           cache: "no-store" as RequestCache,
         })
       ),
-      // clear all queues for today
       fetch("/api/plan/queue-clear?v=" + Date.now(), {
         method: "POST",
         headers: {
@@ -790,7 +782,7 @@ void fetchGuards()
           "x-api-key": "dev-key-123",
           "Cache-Control": "no-store",
         },
-        body: JSON.stringify({ date: ymdLocal(reset) }),
+        body: JSON.stringify({ date: day }),
         cache: "no-store" as RequestCache,
       }),
     ]);
@@ -798,6 +790,7 @@ void fetchGuards()
     console.warn("Backend reset failed (continuing client reset):", e);
   }
 };
+
 
 
   const autopopulate = async () => {
