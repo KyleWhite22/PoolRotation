@@ -56,6 +56,32 @@ const deduplicateQueue = (queue: QueueEntry[]): QueueEntry[] => {
   }
   return Array.from(byGuard.values());
 };
+// Persist everything locally for this day
+const SNAP_KEY = (day: string) => `snapshot:${day}`;
+
+type DaySnapshot = {
+  assigned: Assigned;
+  breakQueue: QueueEntry[];
+  breaks: BreakState;
+  conflicts: ConflictUI[];
+  onDutyIds: string[];     // store set as array
+  simulatedNowISO: string; // ISO so it’s timezone-safe
+};
+
+const loadSnapshot = (day: string): DaySnapshot | null => {
+  try {
+    const raw = localStorage.getItem(SNAP_KEY(day));
+    return raw ? (JSON.parse(raw) as DaySnapshot) : null;
+  } catch {
+    return null;
+  }
+};
+
+const saveSnapshot = (day: string, s: DaySnapshot) => {
+  try {
+    localStorage.setItem(SNAP_KEY(day), JSON.stringify(s));
+  } catch { /* ignore quota errors */ }
+};
 
 export default function Home() {
   // --- Server data ---
@@ -142,6 +168,20 @@ export default function Home() {
       return new Set<string>();
     }
   });
+  // Persist a full snapshot on any change to core day state
+useEffect(() => {
+  if (!allowPersistRef.current) return;
+  const snap: DaySnapshot = {
+    assigned,
+    breakQueue,
+    breaks,
+    conflicts,
+    onDutyIds: [...onDutyIds], // Set -> array
+    simulatedNowISO: simulatedNow.toISOString(),
+  };
+  saveSnapshot(dayKey, snap);
+}, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
+
   useEffect(() => {
     try {
       const raw = localStorage.getItem(`onDuty:${dayKey}`);
@@ -289,74 +329,56 @@ export default function Home() {
   };
 
   // ---------- Hydrate assigned & then fetch data ----------
-  useLayoutEffect(() => {
-    assignedHydratedRef.current = false;
-    allowPersistRef.current = false;
+ useLayoutEffect(() => {
+  assignedHydratedRef.current = false;
+  allowPersistRef.current = false;
 
-    const raw = localStorage.getItem(`assigned:${dayKey}`);
-    if (raw) {
-      try {
-        const loc = JSON.parse(raw) as Assigned;
-        // convert any stored names to IDs through toId
-        const normalized: Assigned = Object.fromEntries(
-          POSITIONS.map((p) => {
-            const v = loc && p.id in loc ? loc[p.id] : null;
-            return [p.id, toId(v)];
-          })
-        ) as Assigned;
-        setAssigned(normalized);
-      } catch {
-        setAssigned(emptyAssigned());
-      }
-    } else {
-      setAssigned(emptyAssigned());
-    }
+  // 1) Start with blank defaults
+  setAssigned(emptyAssigned());
+  setBreakQueue([]); // canonical
+  setBreaks({});
+  setConflicts([]);
 
-    assignedHydratedRef.current = true;
-    queueMicrotask(() => {
-      allowPersistRef.current = true;
-    });
+  // 2) Try to hydrate from ONE local snapshot first
+  const snap = loadSnapshot(dayKey);
+  const bootstrappedFromLocal = !!snap;
 
-    void fetchGuards();
-    void fetchAssignments();
-    void fetchQueue();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dayKey]);
+  if (snap) {
+    // restore simulated clock
+    const d = new Date(snap.simulatedNowISO);
+    if (!isNaN(d.getTime())) setSimulatedNow(d);
 
-  // Persist assigned to localStorage (always store IDs)
-  useEffect(() => {
-    if (!assignedHydratedRef.current || !allowPersistRef.current) return;
-    try {
-      localStorage.setItem(`assigned:${dayKey}`, JSON.stringify(assigned));
-    } catch {}
-  }, [assigned, dayKey]);
+    // restore core states (IDs only; resolve later after guards load)
+    setAssigned(snap.assigned ?? emptyAssigned());
+    setBreakQueue(Array.isArray(snap.breakQueue) ? snap.breakQueue : []);
+    setBreaks(snap.breaks ?? {});
+    setConflicts(Array.isArray(snap.conflicts) ? snap.conflicts : []);
 
-  // Sanitize ONLY after guards are loaded & maps present
-  useEffect(() => {
-    if (!guardsLoaded || knownIds.size === 0) return;
-    // rewrite assigned -> ids
-    setAssigned((prev) => {
-      const next: Assigned = {} as Assigned;
-      for (const p of POSITIONS) next[p.id] = toId(prev[p.id]);
-      return next;
-    });
-    // rewrite queue -> ids
-    setBreakQueue((prev) => {
-      const out: QueueEntry[] = [];
-      for (const q of prev) {
-        const canon = toId(q.guardId);
-        if (canon) out.push({ ...q, guardId: canon });
-      }
-      return deduplicateQueue(out);
-    });
-    // prune on-duty
-    setOnDutyIds((prev) => {
-      const pruned = [...prev]
-        .map((id) => toId(id))
-        .filter((id): id is string => Boolean(id && knownIds.has(id)));
-      return new Set(pruned);
-    });
-  }, [guardsLoaded, knownIds, toId]);
+    // restore on-duty as a Set
+    setOnDutyIds(new Set(snap.onDutyIds ?? []));
+  } else {
+    // no snapshot: keep your existing “start at noon” behavior
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    setSimulatedNow(d);
+    setOnDutyIds(new Set());
+  }
+
+  assignedHydratedRef.current = true;
+  queueMicrotask(() => {
+    allowPersistRef.current = true;
+  });
+
+  // 3) Optionally merge with the backend AFTER local snapshot is visible.
+  //    (Local wins visually on first paint; server can fill gaps.)
+ if (!bootstrappedFromLocal) {
+  void fetchAssignments();
+  void fetchQueue();
+}
+void fetchGuards()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [dayKey]);
+
 
   // -------- Seat/Queue helpers --------
   const findSeatByGuard = (gid: string): string | null => {
