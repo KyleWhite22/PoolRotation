@@ -5,13 +5,18 @@ type Props = {
   open: boolean;
   onClose: () => void;
   guards: Guard[];
-  value: Set<string>;                 // on-duty guard IDs (may arrive mixed)
+  value: Set<string>;                 // on-duty guard IDs
   onChange: (next: Set<string>) => void;
   className?: string;
 };
 
-// normalize helper — always work with plain guard ids
 const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
+const norm = (s: unknown) =>
+  String(s ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 
 export default function OnDutyPanel({
   open,
@@ -24,11 +29,14 @@ export default function OnDutyPanel({
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // Focus search when opened
+  // focus when opened, clear query when closed
   useEffect(() => {
-    if (!open) return;
-    const id = window.setTimeout(() => inputRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
+    if (open) {
+      const id = window.setTimeout(() => inputRef.current?.focus(), 0);
+      return () => window.clearTimeout(id);
+    } else {
+      setQuery("");
+    }
   }, [open]);
 
   // ESC to close
@@ -39,38 +47,11 @@ export default function OnDutyPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Ensure upstream Set is normalized (once per change)
-  useEffect(() => {
-    const normalized = new Set([...value].map((id) => strip(String(id))));
-    // only push if it's actually different
-    if (
-      normalized.size !== value.size ||
-      [...normalized].some((id) => !value.has(id))
-    ) {
-      onChange(normalized);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value]); // rely on parent to keep referential stability
-
-  // Work locally with normalized selection
-  const normValue = useMemo(
-    () => new Set([...value].map((id) => strip(String(id)))),
-    [value]
-  );
-
-  // Sort & filter (accent/Case-insensitive optional)
-  const norm = (s: unknown) =>
-    String(s ?? "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .trim();
+  // Always work with a stripped local copy for comparisons
+  const normValue = useMemo(() => new Set([...value].map((id) => strip(String(id)))), [value]);
 
   const sorted = useMemo(
-    () =>
-      [...guards].sort((a, b) =>
-        norm(a.name || a.id).localeCompare(norm(b.name || b.id))
-      ),
+    () => [...guards].sort((a, b) => norm(a.name || a.id).localeCompare(norm(b.name || b.id))),
     [guards]
   );
 
@@ -84,7 +65,7 @@ export default function OnDutyPanel({
     });
   }, [sorted, query]);
 
-  // Mutators (always write stripped IDs)
+  // Mutators (write stripped ids)
   const toggle = (gidRaw: string) => {
     const gid = strip(gidRaw);
     const next = new Set(normValue);
@@ -171,9 +152,7 @@ export default function OnDutyPanel({
               onChange={(e) => setQuery(e.target.value)}
               className="w-full rounded-lg bg-slate-800/80 border border-slate-700 px-3 py-2 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-500"
             />
-            <div className="mt-2 text-xs text-slate-400">
-              Tip: “Select shown” acts only on the filtered list.
-            </div>
+            <div className="mt-2 text-xs text-slate-400">Tip: “Select shown” acts only on the filtered list.</div>
           </div>
 
           {/* List */}
@@ -182,10 +161,7 @@ export default function OnDutyPanel({
               const id = strip(g.id);
               const checked = normValue.has(id);
               return (
-                <li
-                  key={g.id}
-                  className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60"
-                >
+                <li key={g.id} className="flex items-center justify-between px-4 py-2 hover:bg-slate-800/60">
                   <div className="min-w-0">
                     <p className="text-slate-100 truncate">{g.name || g.id}</p>
                     <p className="text-slate-400 text-xs truncate">{id}</p>
@@ -203,9 +179,7 @@ export default function OnDutyPanel({
               );
             })}
             {!filtered.length && (
-              <li className="px-4 py-6 text-center text-slate-400 text-sm">
-                No guards match your search.
-              </li>
+              <li className="px-4 py-6 text-center text-slate-400 text-sm">No guards match your search.</li>
             )}
           </ul>
 
