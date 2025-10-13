@@ -41,12 +41,15 @@ export default function GuardsPage() {
   const [confirmBulkOpen, setConfirmBulkOpen] = useState(false);
 
   const API_HEADERS = { "x-api-key": "dev-key-123" };
-
+const API_BASE =
+  location.hostname.includes("localhost")
+    ? "http://localhost:3000"
+    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
   // fetch (server source of truth)
   const fetchGuards = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/guards", { headers: API_HEADERS });
+const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
       if (!res.ok) throw new Error(`GET /api/guards failed: ${res.status}`);
       const data = await res.json();
 
@@ -410,7 +413,7 @@ function AddGuardModal({
     if (!canSave || saving) return;
     setSaving(true);
     try {
-      const res = await fetch("/api/guards", {
+      const res = await fetch("${API_BASE}/guards", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
