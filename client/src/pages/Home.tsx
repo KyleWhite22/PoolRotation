@@ -1305,25 +1305,40 @@ function SimClock({
   disabled?: boolean;
 }) {
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
   return (
     <div className="relative w-full max-w-xs">
-      <div aria-hidden className="pointer-events-none absolute inset-0 rounded-2xl bg-pool-500/10 blur-xl opacity-20" />
-      <div className="text-5xl md:text-4xl font-extrabold text-slate-100 leading-none drop-shadow-sm text-center" aria-live="polite">
-        {timeStr}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 rounded-2xl bg-pool-500/10 blur-xl opacity-20"
+      />
+      <div className="flex items-center justify-between gap-4">
+        <div
+          className="text-5xl md:text-4xl font-extrabold text-slate-100 leading-none drop-shadow-sm"
+          aria-live="polite"
+        >
+          {timeStr}
+        </div>
+        <button
+          onClick={onRotate}
+          disabled={disabled}
+          className="inline-flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-pool-500 hover:bg-pool-400 active:bg-pool-400 text-slate-900 text-lg font-semibold
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-pool-300
+                   disabled:opacity-60 disabled:cursor-not-allowed"
+          title="Advance 15 minutes"
+        >
+          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path
+              d="M12 5v4l3-3M21 12a9 9 0 10-3.3 6.9"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          +15 min
+        </button>
       </div>
-      <button
-        onClick={onRotate}
-        disabled={disabled}
-        className="mt-4 w-full inline-flex items-center justify-center gap-2 px-2 py-3 rounded-xl bg-pool-500 hover:bg-pool-400 active:bg-pool-400 text-slate-900 text-lg font-semibold
-                 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-pool-300
-                 disabled:opacity-60 disabled:cursor-not-allowed"
-        title="Advance 15 minutes"
-      >
-        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
-          <path d="M12 5v4l3-3M21 12a9 9 0 10-3.3 6.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        Rotate 15 min
-      </button>
     </div>
   );
 }
