@@ -450,12 +450,7 @@ export default function Home() {
     });
   };
 
-  const updateAssigned = (fn: (draft: Assigned) => void) =>
-    setAssigned((prev) => {
-      const draft: Assigned = { ...prev };
-      fn(draft);
-      return draft;
-    });
+ 
 
   // -------- Mutations --------
   const assignGuard = async (positionId: string, guardId: string) => {
