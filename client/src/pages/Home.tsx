@@ -375,7 +375,7 @@ useEffect(() => {
       returnTo: q.returnTo,
       enteredTick: q.enteredTick,
     }));
-    await fetch(`${API_BASE}/api/plan/queue-set`, {
+    await fetch(`${API_BASE}/api/queue-set`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({ date: dayKey, queue: payload }),
@@ -383,7 +383,7 @@ useEffect(() => {
   };
 
   const fetchQueue = async () => {
-    const res = await fetch(`${API_BASE}/api/plan/queue?date=${dayKey}`, {
+    const res = await fetch(`${API_BASE}/api/queue?date=${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const data = await res.json();
@@ -513,7 +513,7 @@ void fetchGuards()
     const gid = toId(guardId);
     if (!gid) return;
     try {
-      await fetch(`${API_BASE}/api/plan/queue-add`, {
+      await fetch(`${API_BASE}/api/queue-add`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
@@ -732,7 +732,7 @@ const plus15Minutes = async () => {
     const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
     setSimulatedNow(newNow);
 
-    const res = await fetch(`${API_BASE}/api/plan/rotate`, {
+    const res = await fetch(`${API_BASE}/api/rotate`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({
@@ -793,7 +793,7 @@ const plus15Minutes = async () => {
   // Clears queues both server- and client-side
   const handleClearQueues = async () => {
     try {
-      await fetch(`${API_BASE}/api/plan/queue-clear`, {
+      await fetch(`${API_BASE}/api/queue-clear`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({ date: dayKey }),
@@ -864,7 +864,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
           cache: "no-store" as RequestCache,
         })
       ),
-      fetch(`${API_BASE}/api/plan/queue-clear?v=` + Date.now(), {
+      fetch(`${API_BASE}/api/queue-clear?v=` + Date.now(), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -899,7 +899,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
   .filter(id => knownIds.has(id) || isUuid(String(id))); // ✅ allow fresh UUIDs
 
 
-      const res = await fetch(`${API_BASE}/api/plan/autopopulate`, {
+      const res = await fetch(`${API_BASE}/api/autopopulate`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
