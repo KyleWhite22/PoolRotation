@@ -8,6 +8,10 @@ import GuardsListModal from "../components/modals/GuardsListModal";
 import { POSITIONS } from "../data/poolLayout.js";
 import type { Guard } from "../lib/types";
 import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
+const API_BASE =
+  location.hostname.includes("localhost")
+    ? "http://localhost:3000"
+    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
 
 // -------- Local helpers / types --------
 type Assigned = Record<string, string | null>;
@@ -241,7 +245,7 @@ const fetchGuards = useCallback(
     if (!silent) setLoading(true);
 
     try {
-      const res = await fetch("/api/guards", {
+      const res = await fetch("${API_BASE}/api/guards", {
         headers: { "x-api-key": "dev-key-123" },
       });
       if (!res.ok) throw new Error(`GET /api/guards ${res.status}`);
@@ -370,7 +374,7 @@ useEffect(() => {
       returnTo: q.returnTo,
       enteredTick: q.enteredTick,
     }));
-    await fetch("/api/plan/queue-set", {
+    await fetch("${API_BASE}/api/plan/queue-set", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({ date: dayKey, queue: payload }),
@@ -457,7 +461,7 @@ void fetchGuards()
   };
 
   const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
-  await fetch("/api/rotations/slot", {
+  await fetch("${API_BASE}/api/rotations/slot", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
     body: JSON.stringify({
@@ -488,7 +492,7 @@ void fetchGuards()
   const clearGuard = async (positionId: string) => {
     setAssigned((prev) => ({ ...prev, [positionId]: null }));
     try {
-      await fetch("/api/rotations/slot", {
+      await fetch("${API_BASE}/api/rotations/slot", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
@@ -508,7 +512,7 @@ void fetchGuards()
     const gid = toId(guardId);
     if (!gid) return;
     try {
-      await fetch("/api/plan/queue-add", {
+      await fetch("${API_BASE}/api/plan/queue-add", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
@@ -727,7 +731,7 @@ const plus15Minutes = async () => {
     const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
     setSimulatedNow(newNow);
 
-    const res = await fetch("/api/plan/rotate", {
+    const res = await fetch("${API_BASE}/api/plan/rotate", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
       body: JSON.stringify({
@@ -788,7 +792,7 @@ const plus15Minutes = async () => {
   // Clears queues both server- and client-side
   const handleClearQueues = async () => {
     try {
-      await fetch("/api/plan/queue-clear", {
+      await fetch("${API_BASE}/api/plan/queue-clear", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({ date: dayKey }),
@@ -842,7 +846,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
 
     await Promise.allSettled([
       ...POSITIONS.map((p) =>
-        fetch("/api/rotations/slot?v=" + Date.now(), {
+        fetch("${API_BASE}/api/rotations/slot?v=" + Date.now(), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -859,7 +863,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
           cache: "no-store" as RequestCache,
         })
       ),
-      fetch("/api/plan/queue-clear?v=" + Date.now(), {
+      fetch("${API_BASE}/api/plan/queue-clear?v=" + Date.now(), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -894,7 +898,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
   .filter(id => knownIds.has(id) || isUuid(String(id))); // ✅ allow fresh UUIDs
 
 
-      const res = await fetch("/api/plan/autopopulate", {
+      const res = await fetch("${API_BASE}/api/plan/autopopulate", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
