@@ -5,7 +5,7 @@ import ToolbarActions from "../components/actions/ToolbarActions";
 import BreakQueue from "../components/queue/BreakQueue";
 import GuardPickerModal from "../components/modals/GuardPickerModal";
 import GuardsListModal from "../components/modals/GuardsListModal";
-import { POSITIONS } from "../../../shared/data/poolLayout.js";
+import { POSITIONS } from "../data/poolLayout.js";
 import type { Guard } from "../lib/types";
 import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
 

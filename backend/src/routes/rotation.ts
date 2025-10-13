@@ -2,7 +2,7 @@
 import { Router } from "express";
 import { QueryCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb, TABLE } from "../db.js";
-import { POSITIONS } from "../../../shared/data/poolLayout.js";
+import { POSITIONS } from "../data/poolLayout.js";
 
 const router = Router();
 

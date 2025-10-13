@@ -5,7 +5,7 @@ import {
   VIEWBOX,
   POOL_SHAPES,
   REST_BY_SECTION,
-} from "../../../shared/data/poolLayout.js";
+} from "../data/poolLayout.js";
 
 export type Assigned = Record<string, string | null>;
 type Guard = { id: string; name: string; dob: string };

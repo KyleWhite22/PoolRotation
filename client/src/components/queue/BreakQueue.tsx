@@ -1,6 +1,6 @@
 import React, { useMemo, useState, Fragment } from "react";
 import type { QueueEntry, Guard } from "../../lib/types.js";
-import { POSITIONS } from "../../../../shared/data/poolLayout.js";
+import { POSITIONS } from "../../data/poolLayout.js";
 
 const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 

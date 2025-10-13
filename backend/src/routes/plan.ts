@@ -10,7 +10,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { ddb, TABLE } from "../db.js";
 import { computeNext } from "../engine/rotation.js";
-import { POSITIONS, REST_BY_SECTION } from "../../../shared/data/poolLayout.js";
+import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
 const router = Router();
 

@@ -1,6 +1,6 @@
 // engine/rotation.ts
 console.log("[engine/rotation] LOADED");
-import { POSITIONS, REST_BY_SECTION } from "../../../shared/data/poolLayout.js";
+import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
 export type Guard = { id: string; name: string; dob: string };
 export type Assigned = Record<string, string | null>;
