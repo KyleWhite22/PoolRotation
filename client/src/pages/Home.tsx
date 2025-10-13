@@ -318,7 +318,7 @@ useEffect(() => {
 }, []);
 
   const fetchAssignments = async () => {
-    const res = await fetch(`/api/rotations/day/${dayKey}`, {
+    const res = await fetch(`${API_BASE}/api/rotations/day/${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
@@ -383,7 +383,7 @@ useEffect(() => {
   };
 
   const fetchQueue = async () => {
-    const res = await fetch(`/api/plan/queue?date=${dayKey}`, {
+    const res = await fetch(`${API_BASE}/api/plan/queue?date=${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const data = await res.json();
@@ -616,7 +616,7 @@ void fetchGuards()
       if (seatId) {
         setAssigned((prev) => ({ ...prev, [seatId]: null }));
         try {
-          await fetch(`/api/rotations/slot?v=${Date.now()}`, {
+          await fetch(`${API_BASE}/api/rotations/slot?v=${Date.now()}`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
