@@ -8,6 +8,7 @@ import GuardsListModal from "../components/modals/GuardsListModal";
 import { POSITIONS } from "../data/poolLayout.js";
 import type { Guard } from "../lib/types";
 import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
+
 const API_BASE =
   location.hostname.includes("localhost")
     ? "http://localhost:3000"
@@ -56,13 +57,12 @@ const deduplicateQueue = (queue: QueueEntry[]): QueueEntry[] => {
   for (const entry of queue) {
     const gid = strip(entry.guardId);
     if (!gid) continue;
-    // keep last occurrence
     byGuard.set(gid, { guardId: gid, returnTo: entry.returnTo, enteredTick: entry.enteredTick });
   }
   return Array.from(byGuard.values());
 };
-// Persist everything locally for this day
 
+// -------- Local persistence --------
 type DaySnapshot = {
   assigned: Assigned;
   breakQueue: QueueEntry[];
@@ -73,33 +73,40 @@ type DaySnapshot = {
 };
 const SNAP_KEY = (day: string) => `snapshot:${day}`;
 const loadSnapshot = (day: string): DaySnapshot | null => {
-  try { const raw = localStorage.getItem(SNAP_KEY(day)); return raw ? JSON.parse(raw) as DaySnapshot : null; }
-  catch { return null; }
+  try {
+    const raw = localStorage.getItem(SNAP_KEY(day));
+    return raw ? (JSON.parse(raw) as DaySnapshot) : null;
+  } catch {
+    return null;
+  }
 };
-
 const saveSnapshot = (day: string, s: DaySnapshot) => {
   try {
     localStorage.setItem(SNAP_KEY(day), JSON.stringify(s));
-  } catch { /* ignore quota errors */ }
+  } catch {}
 };
 
 export default function Home() {
   // BEFORE any useState:
-const initialSimulatedNow = (() => {
-  const saved = localStorage.getItem("simulatedNowISO");
-  const d = saved ? new Date(saved) : new Date();
-  if (isNaN(d.getTime())) { const now = new Date(); now.setHours(12, 0, 0, 0); return now; }
-  return d;
-})();
-const initialDayKey = ymdLocal(initialSimulatedNow);
-const initialSnap = loadSnapshot(initialDayKey);
+  const initialSimulatedNow = (() => {
+    const saved = localStorage.getItem("simulatedNowISO");
+    const d = saved ? new Date(saved) : new Date();
+    if (isNaN(d.getTime())) {
+      const now = new Date();
+      now.setHours(12, 0, 0, 0);
+      return now;
+    }
+    return d;
+  })();
+  const initialDayKey = ymdLocal(initialSimulatedNow);
+  const initialSnap = loadSnapshot(initialDayKey);
 
   // --- Server data ---
   const [guards, setGuards] = useState<Guard[]>([]);
   const [guardsLoaded, setGuardsLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
-const [isRotatingUI, setIsRotatingUI] = useState(false);
-const [isAutofilling, setIsAutofilling] = useState(false);
+  const [isRotatingUI, setIsRotatingUI] = useState(false);
+  const [isAutofilling, setIsAutofilling] = useState(false);
 
   // --- Rotation state ---
   const [assigned, setAssigned] = useState<Assigned>(() => emptyAssigned());
@@ -125,11 +132,13 @@ const [isAutofilling, setIsAutofilling] = useState(false);
 
   const rotatingRef = useRef(false);
 
-  // Start at 12:00 PM today (local)
- const [simulatedNow, setSimulatedNow] = useState<Date>(() => {
-  return initialSnap?.simulatedNowISO ? new Date(initialSnap.simulatedNowISO) : initialSimulatedNow;
-});
-useEffect(() => { localStorage.setItem("simulatedNowISO", simulatedNow.toISOString()); }, [simulatedNow]);
+  // Simulated time
+  const [simulatedNow, setSimulatedNow] = useState<Date>(() => {
+    return initialSnap?.simulatedNowISO ? new Date(initialSnap.simulatedNowISO) : initialSimulatedNow;
+  });
+  useEffect(() => {
+    localStorage.setItem("simulatedNowISO", simulatedNow.toISOString());
+  }, [simulatedNow]);
 
   const dayKey = useMemo(() => ymdLocal(simulatedNow), [simulatedNow]);
 
@@ -144,65 +153,59 @@ useEffect(() => { localStorage.setItem("simulatedNowISO", simulatedNow.toISOStri
     return m;
   }, [guards]);
 
-// Home.tsx
-const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+  const isUuid = (s: string) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
-const toId = useCallback(
-  (raw: any): string | null => {
-    if (raw == null) return null;
-    const s = strip(String(raw).trim());
-    if (!s) return null;
-
-    // 1) already-known id
-    if (knownIds.has(s)) return s;
-
-    // 2) brand-new id (UUID) that hasn't been fetched into knownIds yet
-    if (isUuid(s)) return s;
-
-    // 3) try by name -> id mapping (only accept if mapped id is known)
-    const byName = guardIdByName.get(norm(s));
-    if (byName && (knownIds.has(byName) || isUuid(byName))) return byName;
-
-    return null;
-  },
-  [knownIds, guardIdByName]
-);
-
+  const toId = useCallback(
+    (raw: any): string | null => {
+      if (raw == null) return null;
+      const s = strip(String(raw).trim());
+      if (!s) return null;
+      if (knownIds.has(s)) return s; // known id
+      if (isUuid(s)) return s; // brand-new id
+      const byName = guardIdByName.get(norm(s));
+      if (byName && (knownIds.has(byName) || isUuid(byName))) return byName;
+      return null;
+    },
+    [knownIds, guardIdByName]
+  );
 
   // --- On-duty selection (persisted per day) ---
-const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
-  if (initialSnap?.onDutyIds) return new Set(initialSnap.onDutyIds);
-  try {
-    const raw = localStorage.getItem(`onDuty:${initialDayKey}`);
-    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
-  } catch { return new Set(); }
-});
+  const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
+    if (initialSnap?.onDutyIds) return new Set(initialSnap.onDutyIds);
+    try {
+      const raw = localStorage.getItem(`onDuty:${initialDayKey}`);
+      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+    } catch {
+      return new Set();
+    }
+  });
+
   // ---------- Persistence guards ----------
   const assignedHydratedRef = useRef(false);
   const allowPersistRef = useRef(false);
+
   // Persist a full snapshot on any change to core day state
-useEffect(() => {
-  if (!allowPersistRef.current) return;
-  const snap: DaySnapshot = {
-    assigned,
-    breakQueue,
-    breaks,
-    conflicts,
-    onDutyIds: [...onDutyIds], // Set -> array
-    simulatedNowISO: simulatedNow.toISOString(),
-  };
-  saveSnapshot(dayKey, snap);
-}, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
+  useEffect(() => {
+    if (!allowPersistRef.current) return;
+    const snap: DaySnapshot = {
+      assigned,
+      breakQueue,
+      breaks,
+      conflicts,
+      onDutyIds: [...onDutyIds],
+      simulatedNowISO: simulatedNow.toISOString(),
+    };
+    saveSnapshot(dayKey, snap);
+  }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
 
-useEffect(() => {
-  if (!guardsLoaded) return;
-  // Keep UUID-looking ids even if they’re not (yet) in knownIds
-  setOnDutyIds(prev => {
-    const keep = [...prev].filter(id => knownIds.has(id) || isUuid(id));
-    return new Set(keep);
-  });
-}, [guardsLoaded, knownIds]);
-
+  useEffect(() => {
+    if (!guardsLoaded) return;
+    setOnDutyIds((prev) => {
+      const keep = [...prev].filter((id) => knownIds.has(id) || isUuid(id));
+      return new Set(keep);
+    });
+  }, [guardsLoaded, knownIds]);
 
   // --- Derived ---
   const usedGuardIds = useMemo(
@@ -213,12 +216,8 @@ useEffect(() => {
     [assigned]
   );
   const seatedSet = useMemo(() => new Set(usedGuardIds), [usedGuardIds]);
-
   const totalQueued = useMemo(() => breakQueue.length, [breakQueue]);
-
   const anyAssigned = useMemo(() => Object.values(assigned).some(Boolean), [assigned]);
-
-
 
   // ---------- Data funcs ----------
   const normalizeGuards = (items: any[]): Guard[] =>
@@ -235,16 +234,11 @@ useEffect(() => {
       })
       .filter(Boolean) as Guard[];
 
+  const guardsDirtyRef = useRef(false);
 
-// put near your other refs/handlers
-const guardsDirtyRef = useRef(false);
-
-// Your existing fetcher
-const fetchGuards = useCallback(
-  async (opts?: { silent?: boolean }) => {
+  const fetchGuards = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = !!opts?.silent;
     if (!silent) setLoading(true);
-
     try {
       const res = await fetch(`${API_BASE}/api/guards`, {
         headers: { "x-api-key": "dev-key-123" },
@@ -252,10 +246,9 @@ const fetchGuards = useCallback(
       if (!res.ok) throw new Error(`GET /api/guards ${res.status}`);
       const data = await res.json();
       const normalized = Array.isArray(data) ? normalizeGuards(data) : [];
-
       setGuards(normalized);
       setGuardsLoaded(true);
-      guardsDirtyRef.current = false; // mark up-to-date
+      guardsDirtyRef.current = false;
       return normalized;
     } catch (err) {
       console.error("fetchGuards error:", err);
@@ -263,66 +256,61 @@ const fetchGuards = useCallback(
     } finally {
       if (!silent) setLoading(false);
     }
-  },
-  []
-);
+  }, []);
 
-// Setup listeners once
-useEffect(() => {
-  // 1) BroadcastChannel
-  let bc: BroadcastChannel | null = null;
-  try {
-    bc = new BroadcastChannel("guards");
-    bc.onmessage = (ev) => {
-      if (ev?.data?.type === "created" || ev?.data?.type === "updated" || ev?.data?.type === "deleted") {
-        guardsDirtyRef.current = true;
-        void fetchGuards();   // pull the new roster asap
-      }
-    };
-  } catch {}
+  // listeners
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel("guards");
+      bc.onmessage = (ev) => {
+        if (ev?.data?.type === "created" || ev?.data?.type === "updated" || ev?.data?.type === "deleted") {
+          guardsDirtyRef.current = true;
+          void fetchGuards();
+        }
+      };
+    } catch {}
 
-  // 2) window custom event
-  const onCreated = () => {
-    guardsDirtyRef.current = true;
-    void fetchGuards();
-  };
-  window.addEventListener("guards:created", onCreated);
-  window.addEventListener("guards:updated", onCreated);
-  window.addEventListener("guards:deleted", onCreated);
-
-  // 3) storage invalidation (cross-tab)
-  const onStorage = (e: StorageEvent) => {
-    if (e.key === "guards:invalidate") {
+    const onCreated = () => {
       guardsDirtyRef.current = true;
       void fetchGuards();
-    }
-  };
-  window.addEventListener("storage", onStorage);
+    };
+    window.addEventListener("guards:created", onCreated);
+    window.addEventListener("guards:updated", onCreated);
+    window.addEventListener("guards:deleted", onCreated);
 
-  // 4) refetch on tab focus
-  const onFocus = () => {
-    if (guardsDirtyRef.current) void fetchGuards();
-  };
-  window.addEventListener("visibilitychange", onFocus);
-  window.addEventListener("focus", onFocus);
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "guards:invalidate") {
+        guardsDirtyRef.current = true;
+        void fetchGuards();
+      }
+    };
+    window.addEventListener("storage", onStorage);
 
-  return () => {
-    try { bc?.close(); } catch {}
-    window.removeEventListener("guards:created", onCreated);
-    window.removeEventListener("guards:updated", onCreated);
-    window.removeEventListener("guards:deleted", onCreated);
-    window.removeEventListener("storage", onStorage);
-    window.removeEventListener("visibilitychange", onFocus);
-    window.removeEventListener("focus", onFocus);
-  };
-}, []);
+    const onFocus = () => {
+      if (guardsDirtyRef.current) void fetchGuards();
+    };
+    window.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      try {
+        bc?.close();
+      } catch {}
+      window.removeEventListener("guards:created", onCreated);
+      window.removeEventListener("guards:updated", onCreated);
+      window.removeEventListener("guards:deleted", onCreated);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [fetchGuards]);
 
   const fetchAssignments = async () => {
     const res = await fetch(`${API_BASE}/api/rotations/day/${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
-    const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] =
-      await res.json();
+    const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] = await res.json();
 
     const latestByStation = new Map<string, (typeof items)[number]>();
     for (const it of items) {
@@ -337,7 +325,7 @@ useEffect(() => {
       const canon = toId(rec?.guardId);
       raw[seat] = canon; // null if unresolvable
     }
-    setAssigned((prev) => ({ ...prev, ...raw }));
+    setAssigned((prev) => ({ ...prev, ...raw } as Assigned));
   };
 
   const alreadyQueuedIds = useMemo(() => {
@@ -346,7 +334,7 @@ useEffect(() => {
     return s;
   }, [breakQueue]);
 
-  // Who is on-duty but not seated or queued
+  // on-duty but not seated/queued
   const onDutyUnassigned: Guard[] = useMemo(() => {
     const onDuty = new Set(
       [...onDutyIds]
@@ -354,22 +342,17 @@ useEffect(() => {
         .filter((id): id is string => Boolean(id && (knownIds.has(id) || isUuid(String(id)))))
     );
     const inUse = new Set<string>();
-
-    for (const gid of Object.values(assigned)) {
-      if (gid) inUse.add(gid);
-    }
+    for (const gid of Object.values(assigned)) if (gid) inUse.add(gid);
     for (const q of breakQueue ?? []) inUse.add(q.guardId);
     for (const id of movingIds) {
       const canon = toId(id);
       if (canon) inUse.add(canon);
     }
-
     return guards.filter((g) => onDuty.has(g.id) && !inUse.has(g.id));
   }, [guards, onDutyIds, assigned, breakQueue, movingIds, knownIds, toId]);
 
   // ---------- Network helpers (queue) ----------
   const persistQueueFlat = async (flat: QueueEntry[]) => {
-    // ensure we only send IDs
     const payload = flat.map((q) => ({
       guardId: q.guardId,
       returnTo: q.returnTo,
@@ -387,7 +370,6 @@ useEffect(() => {
       headers: { "x-api-key": "dev-key-123" },
     });
     const data = await res.json();
-    // convert ANY guard ref to canonical ID, drop unknowns
     const normalized: QueueEntry[] = asQueueEntriesRaw(data?.queue)
       .map((q) => {
         const canon = toId(q.guardId);
@@ -400,58 +382,51 @@ useEffect(() => {
   };
 
   // ---------- Hydrate assigned & then fetch data ----------
- useLayoutEffect(() => {
-  assignedHydratedRef.current = false;
-  allowPersistRef.current = false;
+  useLayoutEffect(() => {
+    assignedHydratedRef.current = false;
+    allowPersistRef.current = false;
 
-  // 1) Start with blank defaults
-  setAssigned(emptyAssigned());
-  setBreakQueue([]); // canonical
-  setBreaks({});
-  setConflicts([]);
+    // 1) defaults
+    setAssigned(emptyAssigned());
+    setBreakQueue([]);
+    setBreaks({});
+    setConflicts([]);
 
-  // 2) Try to hydrate from ONE local snapshot first
-  const snap = loadSnapshot(dayKey);
-  const bootstrappedFromLocal = !!snap;
+    // 2) snapshot first
+    const snap = loadSnapshot(dayKey);
+    const bootstrappedFromLocal = !!snap;
 
-  if (snap) {
-    // restore simulated clock
-    const d = new Date(snap.simulatedNowISO);
-    if (!isNaN(d.getTime())) setSimulatedNow(d);
+    if (snap) {
+      const d = new Date(snap.simulatedNowISO);
+      if (!isNaN(d.getTime())) setSimulatedNow(d);
 
-    // restore core states (IDs only; resolve later after guards load)
-    setAssigned(snap.assigned ?? emptyAssigned());
-    setBreakQueue(Array.isArray(snap.breakQueue) ? snap.breakQueue : []);
-    setBreaks(snap.breaks ?? {});
-    setConflicts(Array.isArray(snap.conflicts) ? snap.conflicts : []);
+      setAssigned(snap.assigned ?? emptyAssigned());
+      setBreakQueue(Array.isArray(snap.breakQueue) ? snap.breakQueue : []);
+      setBreaks(snap.breaks ?? {});
+      setConflicts(Array.isArray(snap.conflicts) ? snap.conflicts : []);
+      setOnDutyIds(new Set(snap.onDutyIds ?? []));
+    } else {
+      const d = new Date();
+      d.setHours(12, 0, 0, 0);
+      setSimulatedNow(d);
+      setOnDutyIds(new Set());
+    }
 
-    // restore on-duty as a Set
-    setOnDutyIds(new Set(snap.onDutyIds ?? []));
-  } else {
-    // no snapshot: keep your existing “start at noon” behavior
-    const d = new Date();
-    d.setHours(12, 0, 0, 0);
-    setSimulatedNow(d);
-    setOnDutyIds(new Set());
-  }
+    assignedHydratedRef.current = true;
+    queueMicrotask(() => {
+      allowPersistRef.current = true;
+    });
 
-  assignedHydratedRef.current = true;
-  queueMicrotask(() => {
-    allowPersistRef.current = true;
-  });
+    // 3) server merge
+    if (!bootstrappedFromLocal) {
+      void fetchAssignments();
+      void fetchQueue();
+    }
+    void fetchGuards();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayKey]);
 
-  // 3) Optionally merge with the backend AFTER local snapshot is visible.
-  //    (Local wins visually on first paint; server can fill gaps.)
- if (!bootstrappedFromLocal) {
-  void fetchAssignments();
-  void fetchQueue();
-}
-void fetchGuards()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [dayKey]);
-
-
-  // -------- Seat/Queue helpers --------
+  // -------- helpers --------
   const findSeatByGuard = (gid: string): string | null => {
     const want = toId(gid);
     if (!want) return null;
@@ -462,19 +437,25 @@ void fetchGuards()
   };
 
   const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
-  await fetch(`${API_BASE}/api/rotations/slot`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-    body: JSON.stringify({
-      date: dayKey,
-      nowISO: simulatedNow.toISOString(),   // ✅ use simulated time
-      stationId: seatId,
-      guardId,
-      notes,
-    }),
-  });
-};
+    await fetch(`${API_BASE}/api/rotations/slot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({
+        date: dayKey,
+        nowISO: simulatedNow.toISOString(),
+        stationId: seatId,
+        guardId,
+        notes,
+      }),
+    });
+  };
 
+  const updateAssigned = (fn: (draft: Assigned) => void) =>
+    setAssigned((prev) => {
+      const draft: Assigned = { ...prev };
+      fn(draft);
+      return draft;
+    });
 
   // -------- Mutations --------
   const assignGuard = async (positionId: string, guardId: string) => {
@@ -482,7 +463,7 @@ void fetchGuards()
     if (!gid) return;
     if (seatedSet.has(gid)) return;
 
-    setAssigned((prev) => ({ ...prev, [positionId]: gid }));
+    setAssigned((prev) => ({ ...prev, [positionId]: gid } as Assigned));
     try {
       await persistSeat(positionId, gid, "drag-drop-assign");
     } catch (err) {
@@ -491,7 +472,7 @@ void fetchGuards()
   };
 
   const clearGuard = async (positionId: string) => {
-    setAssigned((prev) => ({ ...prev, [positionId]: null }));
+    setAssigned((prev) => ({ ...prev, [positionId]: null } as Assigned));
     try {
       await fetch(`${API_BASE}/api/rotations/slot`, {
         method: "POST",
@@ -518,7 +499,7 @@ void fetchGuards()
         headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
-          guardId: gid, // canonical ID
+          guardId: gid,
           returnTo,
           nowISO: simulatedNow.toISOString(),
           notes: "drag-drop-queue",
@@ -530,12 +511,11 @@ void fetchGuards()
     }
   };
 
-  // ---- Queue ops (operate on derived buckets copy, then flatten) ----
+  // ---- Queue ops ----
   const flattenBuckets = (b: Record<string, QueueEntry[]>): QueueEntry[] =>
     SECTIONS.flatMap((sec) => b[sec] ?? []);
 
   const applyBuckets = async (nextBuckets: Record<string, QueueEntry[]>) => {
-    // ensure ids in flat list
     const nextFlat = flattenBuckets(nextBuckets).map((q) => ({
       guardId: q.guardId,
       returnTo: q.returnTo,
@@ -614,7 +594,7 @@ void fetchGuards()
     if (source === "seat") {
       const seatId = e.dataTransfer.getData("application/x-seat-id") || findSeatByGuard(gid);
       if (seatId) {
-        setAssigned((prev) => ({ ...prev, [seatId]: null }));
+        setAssigned((prev) => ({ ...prev, [seatId]: null } as Assigned));
         try {
           await fetch(`${API_BASE}/api/rotations/slot?v=${Date.now()}`, {
             method: "POST",
@@ -693,9 +673,9 @@ void fetchGuards()
 
     if (fromSeatId) {
       setAssigned((prev) => {
-        const next = { ...prev };
+        const next: Assigned = { ...prev };
         next[destSeatId] = gid;
-        next[fromSeatId] = destOccupant ? String(destOccupant) : null;
+        next[fromSeatId] = destOccupant ?? null;
         return next;
       });
       try {
@@ -709,7 +689,7 @@ void fetchGuards()
       return;
     }
 
-    setAssigned((prev) => ({ ...prev, [destSeatId]: gid }));
+    setAssigned((prev) => ({ ...prev, [destSeatId]: gid } as Assigned));
     try {
       await persistSeat(destSeatId, gid, "drag-seat-assign");
     } catch (e) {
@@ -718,56 +698,52 @@ void fetchGuards()
   };
 
   // ---------- Rotation step ----------
-const plus15Minutes = async () => {
-  if (rotatingRef.current) return;
-  rotatingRef.current = true;
-  setIsRotatingUI(true);
-  try {
-    // keep roster in sync if something was just created/edited
-    if (guardsDirtyRef.current) await fetchGuards({ silent: true });
+  const plus15Minutes = async () => {
+    if (rotatingRef.current) return;
+    rotatingRef.current = true;
+    setIsRotatingUI(true);
+    try {
+      if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-    // ✅ compute allowedIds exactly like in autopopulate (accept fresh UUIDs)
-    const allowedIds = [...onDutyIds].filter(id => knownIds.has(id) || isUuid(String(id)));
+      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
 
-    const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
-    setSimulatedNow(newNow);
+      const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
+      setSimulatedNow(newNow);
 
-    const res = await fetch(`${API_BASE}/api/rotate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-      body: JSON.stringify({
-        date: dayKey,
-        nowISO: newNow.toISOString(),
-        allowedIds,                     // ✅ send this
-        assignedSnapshot: assigned,     // ids only
-      }),
-    });
-    const data = await res.json();
+      const res = await fetch(`${API_BASE}/api/rotate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        body: JSON.stringify({
+          date: dayKey,
+          nowISO: newNow.toISOString(),
+          allowedIds,
+          assignedSnapshot: assigned,
+        }),
+      });
+      const data = await res.json();
 
-
-      // Update assigned seats (normalize any stray names to IDs)
+      // merge assigned: only seats the server mentions
       if (data?.assigned) {
-        const base: Assigned = emptyAssigned();
+        const updates: Partial<Assigned> = {};
         const inp = data.assigned;
+
         if (Array.isArray(inp)) {
           for (const it of inp) {
             const seat = String(it?.seat ?? "");
-            const canon = toId(it?.guard);
-            if (seat in base) base[seat] = canon;
+            if (!seat) continue;
+            updates[seat] = toId(it?.guard);
           }
         } else if (inp && typeof inp === "object") {
           for (const [seat, raw] of Object.entries(inp)) {
-            const canon = toId(raw);
-            if (seat in base) base[seat] = canon;
+            updates[seat] = toId(raw);
           }
         }
-        setAssigned((prev) => ({ ...prev, ...base }));
+        setAssigned((prev) => ({ ...prev, ...updates } as Assigned));
       }
 
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
 
-      // Update canonical flat queue (convert to IDs)
       if (Array.isArray(data?.meta?.breakQueue)) {
         const flatSan: QueueEntry[] = asQueueEntriesRaw(data.meta.breakQueue)
           .map((q) => {
@@ -779,14 +755,14 @@ const plus15Minutes = async () => {
           .filter(Boolean) as QueueEntry[];
         setBreakQueue(deduplicateQueue(flatSan));
       } else {
-        await fetchQueue(); // fallback
+        await fetchQueue();
       }
     } catch (e) {
       console.error("Rotate failed:", e);
       await fetchQueue();
     } finally {
       rotatingRef.current = false;
-      setIsRotatingUI(false); 
+      setIsRotatingUI(false);
     }
   };
 
@@ -801,103 +777,93 @@ const plus15Minutes = async () => {
     } catch (e) {
       console.error("Failed to clear queues:", e);
     } finally {
-      setBreakQueue([]); // canonical reset
+      setBreakQueue([]);
     }
   };
 
   const handleReset = async () => {
-  // 1) Reset clock to 12:00 PM local (same day)
-  const reset = new Date(simulatedNow);
-  reset.setHours(12, 0, 0, 0);
-  setSimulatedNow(reset);
+    const reset = new Date(simulatedNow);
+    reset.setHours(12, 0, 0, 0);
+    setSimulatedNow(reset);
 
-  // 2) Build the target reset state
-  const allIds = guards.map(g => g.id).filter(Boolean);
-  const resetAssigned = emptyAssigned();
-  const resetQueue: QueueEntry[] = [];
-  const resetBreaks: BreakState = {};
-  const resetConflicts: ConflictUI[] = [];
-  const resetOnDuty = new Set(allIds);
+    const allIds = guards.map((g) => g.id).filter(Boolean);
+    const resetAssigned = emptyAssigned();
+    const resetQueue: QueueEntry[] = [];
+    const resetBreaks: BreakState = {};
+    const resetConflicts: ConflictUI[] = [];
+    const resetOnDuty = new Set(allIds);
 
-  // 3) Apply to React state
-  setAssigned(resetAssigned);
-  setBreakQueue(resetQueue);
-  setBreaks(resetBreaks);
-  setConflicts(resetConflicts);
-  setOnDutyIds(resetOnDuty);
+    setAssigned(resetAssigned);
+    setBreakQueue(resetQueue);
+    setBreaks(resetBreaks);
+    setConflicts(resetConflicts);
+    setOnDutyIds(resetOnDuty);
 
-  // 4) Persist **immediately** so refresh can’t lose it
-  const day = ymdLocal(reset);
-  const snap: DaySnapshot = {
-    assigned: resetAssigned,
-    breakQueue: resetQueue,
-    breaks: resetBreaks,
-    conflicts: resetConflicts,
-    onDutyIds: [...resetOnDuty],       // Set -> array
-    simulatedNowISO: reset.toISOString(),
-  };
-  try {
-    saveSnapshot(day, snap);
-localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // optional legacy
-  } catch {}
+    const day = ymdLocal(reset);
+    const snap: DaySnapshot = {
+      assigned: resetAssigned,
+      breakQueue: resetQueue,
+      breaks: resetBreaks,
+      conflicts: resetConflicts,
+      onDutyIds: [...resetOnDuty],
+      simulatedNowISO: reset.toISOString(),
+    };
+    try {
+      saveSnapshot(day, snap);
+      localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds));
+    } catch {}
 
-  // 5) (Optional) tell backend to clear seats & queues for today
-  try {
-    const time = new Date().toISOString().slice(11, 16);
-
-    await Promise.allSettled([
-      ...POSITIONS.map((p) =>
-        fetch(`${API_BASE}/api/rotations/slot?v=`+ Date.now(), {
+    try {
+      const time = new Date().toISOString().slice(11, 16);
+      await Promise.allSettled([
+        ...POSITIONS.map((p) =>
+          fetch(`${API_BASE}/api/rotations/slot?v=` + Date.now(), {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": "dev-key-123",
+              "Cache-Control": "no-store",
+            },
+            body: JSON.stringify({
+              date: day,
+              time,
+              stationId: p.id,
+              guardId: null,
+              notes: "reset-all",
+            }),
+            cache: "no-store" as RequestCache,
+          })
+        ),
+        fetch(`${API_BASE}/api/queue-clear?v=` + Date.now(), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "x-api-key": "dev-key-123",
             "Cache-Control": "no-store",
           },
-          body: JSON.stringify({
-            date: day,
-            time,
-            stationId: p.id,
-            guardId: null,
-            notes: "reset-all",
-          }),
+          body: JSON.stringify({ date: day }),
           cache: "no-store" as RequestCache,
-        })
-      ),
-      fetch(`${API_BASE}/api/queue-clear?v=` + Date.now(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": "dev-key-123",
-          "Cache-Control": "no-store",
-        },
-        body: JSON.stringify({ date: day }),
-        cache: "no-store" as RequestCache,
-      }),
-    ]);
-  } catch (e) {
-    console.warn("Backend reset failed (continuing client reset):", e);
-  }
-};
-
-
+        }),
+      ]);
+    } catch (e) {
+      console.warn("Backend reset failed (continuing client reset):", e);
+    }
+  };
 
   const autopopulate = async () => {
     setIsAutofilling(true);
     try {
-       if (guardsDirtyRef.current) {
-      await fetchGuards({ silent: true });
-    }
+      if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
       const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
-    if (allowedIds.length === 0) {
-      alert("Select at least one on-duty guard before Autopopulate.");
-      return;
-    }
+      if (allowedIds.length === 0) {
+        alert("Select at least one on-duty guard before Autopopulate.");
+        return;
+      }
 
-      const lockedQueueIds = Array.from(new Set(breakQueue.map(q => q.guardId)))
-  .filter(id => knownIds.has(id) || isUuid(String(id))); // ✅ allow fresh UUIDs
-
+      const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId))).filter(
+        (id) => knownIds.has(id) || isUuid(String(id))
+      );
 
       const res = await fetch(`${API_BASE}/api/autopopulate`, {
         method: "POST",
@@ -906,7 +872,7 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
           date: dayKey,
           nowISO: simulatedNow.toISOString(),
           allowedIds,
-          assignedSnapshot: assigned, // all IDs
+          assignedSnapshot: assigned,
           lockedQueueIds,
         }),
       });
@@ -914,22 +880,23 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
       const data = await res.json();
 
       if (data?.assigned) {
-        const base: Assigned = emptyAssigned();
+        const updates: Partial<Assigned> = {};
         const inp = data.assigned;
+
         if (Array.isArray(inp)) {
           for (const it of inp) {
             const seat = String(it?.seat ?? "");
-            const canon = toId(it?.guard);
-            if (seat in base) base[seat] = canon;
+            if (!seat) continue;
+            updates[seat] = toId(it?.guard);
           }
         } else if (inp && typeof inp === "object") {
           for (const [seat, raw] of Object.entries(inp)) {
-            const canon = toId(raw);
-            if (seat in base) base[seat] = canon;
+            updates[seat] = toId(raw);
           }
         }
-        setAssigned((prev) => ({ ...prev, ...base }));
+        setAssigned((prev) => ({ ...prev, ...updates } as Assigned));
       }
+
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
 
@@ -949,8 +916,8 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
     } catch (e) {
       console.error("Autopopulate failed:", e);
     } finally {
-    setIsAutofilling(false); // NEW
-  }
+      setIsAutofilling(false);
+    }
   };
 
   // util to compute age
@@ -1031,11 +998,11 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex flex-col items-center gap-2 text-center">
               <button
-  className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
-  onClick={() => setOnDutyOpen(true)}
->
-  Select On-Duty Guards {guards.length ? `(${guards.length})` : ""}
-</button>
+                className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
+                onClick={() => setOnDutyOpen(true)}
+              >
+                Select On-Duty Guards {guards.length ? `(${guards.length})` : ""}
+              </button>
               <p className="text-slate-400 text-sm">
                 Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
               </p>
@@ -1087,8 +1054,8 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
 
       <GuardsListModal open={listOpen} onClose={() => setListOpen(false)} guards={guards} />
       {loading && !isRotatingUI && !isAutofilling && <StandardLoading />}
-{isRotatingUI && <RotationLoading />}
-{isAutofilling && <AutofillLoading />}
+      {isRotatingUI && <RotationLoading />}
+      {isAutofilling && <AutofillLoading />}
     </AppShell>
   );
 }
@@ -1128,7 +1095,7 @@ function OnDutySelectorModal({
   const filtered = useMemo(() => {
     const q = normName(query);
     if (!q) return sorted;
-    const tokens = q.split(/\s+/);
+    const tokens = q.split(/\s+/).filter(Boolean);
     return sorted.filter((g) => {
       const hay = normName(g.name);
       return tokens.every((t) => hay.includes(t));
@@ -1199,7 +1166,12 @@ function OnDutySelectorModal({
                     <p className="text-slate-100 truncate">{g.name || g.id}</p>
                   </div>
                   <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-                    <input type="checkbox" checked={checked} onChange={() => toggle(g.id)} className="h-4 w-4 accent-slate-300" />
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggle(g.id)}
+                      className="h-4 w-4 accent-slate-300"
+                    />
                     <span className="text-slate-300 text-sm">{checked ? "On duty" : "Off"}</span>
                   </label>
                 </li>
@@ -1269,7 +1241,6 @@ function OnDutyBench({
         <span className="text-xs text-slate-400">{guards.length}</span>
       </header>
 
-      {/* Dedicated visual drop zone */}
       <div
         className={[
           "m-3 rounded-xl border-2 border-dashed px-3 py-4 text-sm transition-colors",
@@ -1301,9 +1272,7 @@ function OnDutyBench({
 
       <div className="p-3 pt-0">
         {guards.length === 0 ? (
-          <p className="text-sm text-slate-400 px-1 py-2">
-            No on-duty guards waiting.
-          </p>
+          <p className="text-sm text-slate-400 px-1 py-2">No on-duty guards waiting.</p>
         ) : (
           <ul className="flex flex-wrap gap-2">
             {guards.map((g) => (
@@ -1325,7 +1294,6 @@ function OnDutyBench({
             ))}
           </ul>
         )}
-        
       </div>
     </section>
   );
@@ -1344,18 +1312,10 @@ function SimClock({
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
     <div className="relative w-full max-w-xs">
-      {/* soft glow */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 rounded-2xl bg-pool-500/10 blur-xl opacity-20"
-      />
-      <div
-        className="text-5xl md:text-4xl font-extrabold text-slate-100 leading-none drop-shadow-sm text-center"
-        aria-live="polite"
-      >
+      <div aria-hidden className="pointer-events-none absolute inset-0 rounded-2xl bg-pool-500/10 blur-xl opacity-20" />
+      <div className="text-5xl md:text-4xl font-extrabold text-slate-100 leading-none drop-shadow-sm text-center" aria-live="polite">
         {timeStr}
       </div>
-
       <button
         onClick={onRotate}
         disabled={disabled}
@@ -1367,7 +1327,7 @@ function SimClock({
         <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
           <path d="M12 5v4l3-3M21 12a9 9 0 10-3.3 6.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        Rotate +15 min
+        Rotate 15 min
       </button>
     </div>
   );
