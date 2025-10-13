@@ -141,21 +141,30 @@ useEffect(() => { localStorage.setItem("simulatedNowISO", simulatedNow.toISOStri
     return m;
   }, [guards]);
 
-  // In-component canonical resolver: ANY ref -> canonical guard ID or null
-  const toId = useCallback(
-    (raw: any): string | null => {
-      if (raw == null) return null;
-      const s = strip(String(raw).trim());
-      if (!s) return null;
-      // already known id?
-      if (knownIds.has(s)) return s;
-      // try as a name
-      const byName = guardIdByName.get(norm(s));
-      if (byName && knownIds.has(byName)) return byName;
-      return null;
-    },
-    [knownIds, guardIdByName]
-  );
+// Home.tsx
+const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+
+const toId = useCallback(
+  (raw: any): string | null => {
+    if (raw == null) return null;
+    const s = strip(String(raw).trim());
+    if (!s) return null;
+
+    // 1) already-known id
+    if (knownIds.has(s)) return s;
+
+    // 2) brand-new id (UUID) that hasn't been fetched into knownIds yet
+    if (isUuid(s)) return s;
+
+    // 3) try by name -> id mapping (only accept if mapped id is known)
+    const byName = guardIdByName.get(norm(s));
+    if (byName && (knownIds.has(byName) || isUuid(byName))) return byName;
+
+    return null;
+  },
+  [knownIds, guardIdByName]
+);
+
 
   // --- On-duty selection (persisted per day) ---
 const [onDutyIds, setOnDutyIds] = useState<Set<string>>(() => {
@@ -179,14 +188,15 @@ useEffect(() => {
   saveSnapshot(dayKey, snap);
 }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
 
-
- useEffect(() => {
-  if (!guardsLoaded || knownIds.size === 0) return;
+useEffect(() => {
+  if (!guardsLoaded) return;
+  // Keep UUID-looking ids even if they’re not (yet) in knownIds
   setOnDutyIds(prev => {
-    const pruned = [...prev].filter(id => knownIds.has(id));
-    return new Set(pruned);
+    const keep = [...prev].filter(id => knownIds.has(id) || isUuid(id));
+    return new Set(keep);
   });
 }, [guardsLoaded, knownIds]);
+
 
   // --- Derived ---
   const usedGuardIds = useMemo(
@@ -221,17 +231,87 @@ useEffect(() => {
       })
       .filter(Boolean) as Guard[];
 
-  const fetchGuards = async () => {
-    setLoading(true);
+
+// put near your other refs/handlers
+const guardsDirtyRef = useRef(false);
+
+// Your existing fetcher
+const fetchGuards = useCallback(
+  async (opts?: { silent?: boolean }) => {
+    const silent = !!opts?.silent;
+    if (!silent) setLoading(true);
+
     try {
-      const res = await fetch("/api/guards", { headers: { "x-api-key": "dev-key-123" } });
+      const res = await fetch("/api/guards", {
+        headers: { "x-api-key": "dev-key-123" },
+      });
+      if (!res.ok) throw new Error(`GET /api/guards ${res.status}`);
       const data = await res.json();
-      setGuards(Array.isArray(data) ? normalizeGuards(data) : []);
+      const normalized = Array.isArray(data) ? normalizeGuards(data) : [];
+
+      setGuards(normalized);
       setGuardsLoaded(true);
+      guardsDirtyRef.current = false; // mark up-to-date
+      return normalized;
+    } catch (err) {
+      console.error("fetchGuards error:", err);
+      return null;
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
+    }
+  },
+  []
+);
+
+// Setup listeners once
+useEffect(() => {
+  // 1) BroadcastChannel
+  let bc: BroadcastChannel | null = null;
+  try {
+    bc = new BroadcastChannel("guards");
+    bc.onmessage = (ev) => {
+      if (ev?.data?.type === "created" || ev?.data?.type === "updated" || ev?.data?.type === "deleted") {
+        guardsDirtyRef.current = true;
+        void fetchGuards();   // pull the new roster asap
+      }
+    };
+  } catch {}
+
+  // 2) window custom event
+  const onCreated = () => {
+    guardsDirtyRef.current = true;
+    void fetchGuards();
+  };
+  window.addEventListener("guards:created", onCreated);
+  window.addEventListener("guards:updated", onCreated);
+  window.addEventListener("guards:deleted", onCreated);
+
+  // 3) storage invalidation (cross-tab)
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === "guards:invalidate") {
+      guardsDirtyRef.current = true;
+      void fetchGuards();
     }
   };
+  window.addEventListener("storage", onStorage);
+
+  // 4) refetch on tab focus
+  const onFocus = () => {
+    if (guardsDirtyRef.current) void fetchGuards();
+  };
+  window.addEventListener("visibilitychange", onFocus);
+  window.addEventListener("focus", onFocus);
+
+  return () => {
+    try { bc?.close(); } catch {}
+    window.removeEventListener("guards:created", onCreated);
+    window.removeEventListener("guards:updated", onCreated);
+    window.removeEventListener("guards:deleted", onCreated);
+    window.removeEventListener("storage", onStorage);
+    window.removeEventListener("visibilitychange", onFocus);
+    window.removeEventListener("focus", onFocus);
+  };
+}, []);
 
   const fetchAssignments = async () => {
     const res = await fetch(`/api/rotations/day/${dayKey}`, {
@@ -267,7 +347,7 @@ useEffect(() => {
     const onDuty = new Set(
       [...onDutyIds]
         .map((id) => toId(id))
-        .filter((id): id is string => Boolean(id && knownIds.has(id)))
+        .filter((id): id is string => Boolean(id && (knownIds.has(id) || isUuid(String(id)))))
     );
     const inUse = new Set<string>();
 
@@ -378,21 +458,19 @@ void fetchGuards()
   };
 
   const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
-    await fetch("/api/rotations/slot", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": "dev-key-123",
-      },
-      body: JSON.stringify({
-        date: dayKey,
-        time: new Date().toISOString().slice(11, 16),
-        stationId: seatId,
-        guardId, // already canonical ID or null
-        notes,
-      }),
-    });
-  };
+  await fetch("/api/rotations/slot", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+    body: JSON.stringify({
+      date: dayKey,
+      nowISO: simulatedNow.toISOString(),   // ✅ use simulated time
+      stationId: seatId,
+      guardId,
+      notes,
+    }),
+  });
+};
+
 
   // -------- Mutations --------
   const assignGuard = async (positionId: string, guardId: string) => {
@@ -636,25 +714,32 @@ void fetchGuards()
   };
 
   // ---------- Rotation step ----------
-  const plus15Minutes = async () => {
-    if (rotatingRef.current) return;
-    rotatingRef.current = true;
- setIsRotatingUI(true);
-    try {
-      const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
-      setSimulatedNow(newNow);
+const plus15Minutes = async () => {
+  if (rotatingRef.current) return;
+  rotatingRef.current = true;
+  setIsRotatingUI(true);
+  try {
+    // keep roster in sync if something was just created/edited
+    if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-      const res = await fetch("/api/plan/rotate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          nowISO: newNow.toISOString(),
-          assignedSnapshot: assigned, // snapshot already uses IDs
-        }),
-      });
+    // ✅ compute allowedIds exactly like in autopopulate (accept fresh UUIDs)
+    const allowedIds = [...onDutyIds].filter(id => knownIds.has(id) || isUuid(String(id)));
 
-      const data = await res.json();
+    const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
+    setSimulatedNow(newNow);
+
+    const res = await fetch("/api/plan/rotate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      body: JSON.stringify({
+        date: dayKey,
+        nowISO: newNow.toISOString(),
+        allowedIds,                     // ✅ send this
+        assignedSnapshot: assigned,     // ids only
+      }),
+    });
+    const data = await res.json();
+
 
       // Update assigned seats (normalize any stray names to IDs)
       if (data?.assigned) {
@@ -796,15 +881,19 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
   const autopopulate = async () => {
     setIsAutofilling(true);
     try {
-      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id));
-      if (allowedIds.length === 0) {
-        alert("Select at least one on-duty guard before Autopopulate.");
-        return;
-      }
+       if (guardsDirtyRef.current) {
+      await fetchGuards({ silent: true });
+    }
 
-      const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId))).filter((id) =>
-        knownIds.has(id)
-      );
+      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+    if (allowedIds.length === 0) {
+      alert("Select at least one on-duty guard before Autopopulate.");
+      return;
+    }
+
+      const lockedQueueIds = Array.from(new Set(breakQueue.map(q => q.guardId)))
+  .filter(id => knownIds.has(id) || isUuid(String(id))); // ✅ allow fresh UUIDs
+
 
       const res = await fetch("/api/plan/autopopulate", {
         method: "POST",
@@ -1233,10 +1322,7 @@ function OnDutyBench({
             ))}
           </ul>
         )}
-        <p className="mt-2 text-xs text-slate-500">
-          Drag a chip to a seat or a section queue. Or drop <em>any</em> chip
-          into the box above to bench it.
-        </p>
+        
       </div>
     </section>
   );

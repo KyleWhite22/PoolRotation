@@ -472,7 +472,7 @@ onCreated(g);
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="mt-1 w-full rounded bg-slate-800 border border-slate-700 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-pool-400"
-              placeholder="Jane Doe"
+              placeholder=""
             />
           </label>
 
