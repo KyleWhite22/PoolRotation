@@ -1,28 +1,48 @@
 // src/lib/api.ts
+export type Guard = { id: string; name: string; dob: string | null; phone: string | null };
+
 const API_BASE =
   location.hostname.includes("localhost")
     ? "http://localhost:3000"
     : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
 
-const j = async <T>(r: Response) => {
-  if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-  return (await r.json()) as T;
-};
-const get  = <T>(p: string) => fetch(`${API_BASE}${p}`, { credentials: "include" }).then(j<T>);
-const post = <T>(p: string, body?: unknown) =>
-  fetch(`${API_BASE}${p}`, {
+console.log("[api] API_BASE =", API_BASE);
+(window as any).__API_BASE = API_BASE; // check in console if needed
+
+async function asJson<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} — ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+const get = <T>(path: string) =>
+  fetch(`${API_BASE}${path}`, { credentials: "include" }).then(asJson<T>);
+
+const post = <T>(path: string, body?: unknown) =>
+  fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: body ? JSON.stringify(body) : undefined,
-  }).then(j<T>);
+  }).then(asJson<T>);
 
 export const api = {
-  guards:   () => get("/api/guards"),
-  day:      (day: string) => get(`/api/rotations/day/${day}`),
-  slot:     (body: any)   => post("/api/rotations/slot", body),
+  // Guards
+  guards: async (): Promise<Guard[]> => {
+    const data: any = await get<any>("/api/guards");
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.items)) return data.items; // tolerate {items:[]}
+    if (Array.isArray(data?.data))  return data.data;  // tolerate {data:[]}
+    return [];
+  },
 
-  // plan is mounted at /api (no /plan prefix)
+  // Rotations
+  day:  (day: string) => get(`/api/rotations/day/${encodeURIComponent(day)}`),
+  slot: (body: any)   => post("/api/rotations/slot", body),
+
+  // Plan router is mounted at /api (no /plan prefix)
   queueGet: (day: string) => get(`/api/queue?date=${encodeURIComponent(day)}`),
   queueAdd: (body: any)   => post("/api/queue-add", body),
   queueClr: (day: string) => post("/api/queue-clear", { date: day }),
