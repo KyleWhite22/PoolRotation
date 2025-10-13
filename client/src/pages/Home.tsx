@@ -1031,11 +1031,11 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex flex-col items-center gap-2 text-center">
               <button
-                className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
-                onClick={() => setOnDutyOpen(true)}
-              >
-                Select On-Duty Guards
-              </button>
+  className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
+  onClick={() => setOnDutyOpen(true)}
+>
+  Select On-Duty Guards {guards.length ? `(${guards.length})` : ""}
+</button>
               <p className="text-slate-400 text-sm">
                 Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
               </p>
