@@ -976,7 +976,6 @@ localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds)); // option
       <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px_360px] gap-6 items-start">
         {/* LEFT: Clock + Pool map */}
         <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
-          <h2 className="text-lg font-semibold text-slate-100 mb-3">Pool Map</h2>
           <div className="mb-3 grid place-items-center">
             <SimClock now={simulatedNow} onRotate={plus15Minutes} disabled={rotatingRef.current} />
           </div>
