@@ -2,11 +2,17 @@
 import { useEffect, useMemo, useState } from "react";
 import AppShell from "../components/AppShell";
 
+// ---------- API base (shared by page + modals) ----------
+const API_BASE =
+  location.hostname.includes("localhost")
+    ? "http://localhost:3000"
+    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
+
 // --- Types ---
 type Guard = {
   id: string;
   name: string;
-  dob?: string;   // YYYY-MM-DD
+  dob?: string;   // YYYY-MM-DD or null-ish
   phone?: string; // any format
 };
 
@@ -40,16 +46,11 @@ export default function GuardsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [confirmBulkOpen, setConfirmBulkOpen] = useState(false);
 
-  const API_HEADERS = { "x-api-key": "dev-key-123" };
-const API_BASE =
-  location.hostname.includes("localhost")
-    ? "http://localhost:3000"
-    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
   // fetch (server source of truth)
   const fetchGuards = async () => {
     setLoading(true);
     try {
-const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
+      const res = await fetch(`${API_BASE}/api/guards`);
       if (!res.ok) throw new Error(`GET /api/guards failed: ${res.status}`);
       const data = await res.json();
 
@@ -69,7 +70,7 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
             .filter((g: Guard) => g.id)
         : [];
 
-      setGuards(fetched); // replace with the server's truth
+      setGuards(fetched);
     } catch (e) {
       console.error(e);
     } finally {
@@ -79,7 +80,6 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
 
   useEffect(() => {
     fetchGuards();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // keep selection in sync with current guards (prune deleted / filtered-out)
@@ -97,14 +97,14 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
 
     const filtered = query.trim()
       ? withAge.filter((g) =>
-          g.name.toLowerCase().includes(query.trim().toLowerCase())
+          (g.name ?? "").toLowerCase().includes(query.trim().toLowerCase())
         )
       : withAge;
 
     filtered.sort((a, b) => {
       let res = 0;
       if (sortKey === "name") {
-        res = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+        res = (a.name ?? "").localeCompare(b.name ?? "", undefined, { sensitivity: "base" });
       } else if (sortKey === "age") {
         const aa = (a as any).age as number | null;
         const bb = (b as any).age as number | null;
@@ -159,10 +159,7 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
   // single delete
   const removeGuard = async (id: string) => {
     try {
-      const res = await fetch(`/api/guards/${id}`, {
-        method: "DELETE",
-        headers: API_HEADERS,
-      });
+      const res = await fetch(`${API_BASE}/api/guards/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`DELETE /api/guards/${id} failed: ${res.status}`);
       setConfirmId(null);
       // local remove for snappy UX
@@ -172,7 +169,7 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
         next.delete(id);
         return next;
       });
-      // background refresh
+      // clean refresh
       fetchGuards();
     } catch (e) {
       console.error("Failed to delete guard:", e);
@@ -191,29 +188,28 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
 
     // best-effort server delete
     const results = await Promise.allSettled(
-      ids.map((id) =>
-        fetch(`/api/guards/${id}`, { method: "DELETE", headers: API_HEADERS })
-      )
+      ids.map((id) => fetch(`${API_BASE}/api/guards/${id}`, { method: "DELETE" }))
     );
 
     const failures = results
       .map((r, i) => ({ r, id: ids[i] }))
-      .filter(({ r }) => r.status === "rejected" || (r as PromiseFulfilledResult<Response>).value?.ok === false);
+      .filter(
+        ({ r }) =>
+          r.status === "rejected" ||
+          ((r as PromiseFulfilledResult<Response>).value?.ok === false)
+      );
 
     if (failures.length) {
-      // re-sync if something went wrong
       console.warn("Some deletions failed:", failures);
       await fetchGuards();
       alert(`Failed to remove ${failures.length} guard(s). List has been refreshed.`);
     } else {
-      // clean refresh to be safe
       fetchGuards();
     }
   };
 
   return (
     <AppShell title="Guard Manager" actions={<></>}>
-      {/* Centered content container */}
       <div className="max-w-5xl mx-auto w-full">
         <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           {/* Controls */}
@@ -343,7 +339,6 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
         <AddGuardModal
           onClose={() => setCreateOpen(false)}
           onCreated={(created) => {
-            // optimistic insert (dedupe by id)
             setGuards((prev) => {
               if (!created?.id) return prev;
               const seen = new Set(prev.map((g) => g.id));
@@ -351,7 +346,6 @@ const res = await fetch(`${API_BASE}/api/guards`, { headers: API_HEADERS });
               return [created, ...prev];
             });
             setCreateOpen(false);
-            // refresh to normalize
             fetchGuards();
           }}
         />
@@ -413,9 +407,9 @@ function AddGuardModal({
     if (!canSave || saving) return;
     setSaving(true);
     try {
-      const res = await fetch("${API_BASE}/guards", {
+      const res = await fetch(`${API_BASE}/api/guards`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim(),
           dob: (dob ?? "").trim() || null,
@@ -447,9 +441,9 @@ function AddGuardModal({
         phone: created?.phone ?? (phone || ""),
       };
       try { new BroadcastChannel("guards").postMessage({ type: "created", guard: g }); } catch {}
-try { window.dispatchEvent(new CustomEvent("guards:created", { detail: g })); } catch {}
-try { localStorage.setItem("guards:invalidate", String(Date.now())); } catch {}
-onCreated(g);
+      try { window.dispatchEvent(new CustomEvent("guards:created", { detail: g })); } catch {}
+      try { localStorage.setItem("guards:invalidate", String(Date.now())); } catch {}
+      onCreated(g);
     } catch (e: any) {
       console.error("Failed to create guard:", e);
       alert(e.message || "Failed to create guard. Check console for details.");
@@ -530,7 +524,6 @@ function EditGuardModal({
   const [phone, setPhone] = useState(guard.phone ?? "");
   const [saving, setSaving] = useState(false);
 
-  const API_HEADERS = { "Content-Type": "application/json", "x-api-key": "dev-key-123" };
   const canSave = name.trim().length > 0;
 
   const submit = async () => {
@@ -541,9 +534,9 @@ function EditGuardModal({
       body.dob = dob || null;
       body.phone = phone || null;
 
-      const res = await fetch(`/api/guards/${guard.id}`, {
+      const res = await fetch(`${API_BASE}/api/guards/${guard.id}`, {
         method: "PUT",
-        headers: API_HEADERS,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
