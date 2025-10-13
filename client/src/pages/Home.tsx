@@ -114,13 +114,12 @@ const [isAutofilling, setIsAutofilling] = useState(false);
   // --- UI state ---
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [queuePickerFor, setQueuePickerFor] = useState<string | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
+  const [_createOpen, setCreateOpen] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [onDutyOpen, setOnDutyOpen] = useState(false);
   const [movingIds] = useState<Set<string>>(new Set());
 
   const rotatingRef = useRef(false);
-  const SIM_KEY = "simulatedNowISO";
 
   // Start at 12:00 PM today (local)
  const [simulatedNow, setSimulatedNow] = useState<Date>(() => {
@@ -1223,7 +1222,7 @@ function OnDutyBench({
   onDropGuardToBench: (guardId: string, e: React.DragEvent) => void;
 }) {
   const [zoneActive, setZoneActive] = useState(false);
-  const [dragDepth, setDragDepth] = useState(0);
+  const [_dragDepth, setDragDepth] = useState(0);
 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();

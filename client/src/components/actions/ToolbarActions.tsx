@@ -1,5 +1,5 @@
 export default function ToolbarActions({
-  onPlus15, onAuto, onNewGuard, onRefresh, disabled, stamp
+  onAuto, onRefresh,  stamp
 }: {
   onPlus15: () => void; onAuto: () => void; onNewGuard: () => void; onRefresh: () => void;
   disabled?: boolean; stamp?: string;

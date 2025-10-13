@@ -28,7 +28,6 @@ export default function PoolMap({
   guards,
   assigned,
   onPick,
-  onClear, // not used here, kept for API compatibility
   className,
   conflicts = [],
   onSeatDrop,

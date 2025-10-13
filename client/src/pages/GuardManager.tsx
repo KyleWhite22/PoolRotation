@@ -1,5 +1,5 @@
 // guardManager.tsx
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState } from "react";
 import AppShell from "../components/AppShell";
 
 // --- Types ---
