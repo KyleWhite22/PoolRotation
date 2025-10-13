@@ -1,4 +1,4 @@
-/* eslint-disable no-console */
+//src/routes/plan.ts
 console.log("[routes/plan] LOADED");
 
 import { Router } from "express";
@@ -13,6 +13,7 @@ import { computeNext } from "../engine/rotation.js";
 import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
 const router = Router();
+router.get("/_ping", (_req, res) => res.json({ ok: true, router: "plan" }));
 
 // ---------- Canonicalization helpers ----------
 const stripGuardPrefix = (v: any): string =>
@@ -121,44 +122,6 @@ async function loadAssignedLatestFrame(
   return assigned;
 }
 
-function sanitizeQueue(
-  queue: any[],
-  knownIds: Set<string>,
-  byName: Map<string, string>,
-  currentTick?: number
-): QueueRow[] {
-  const coerceTick = (raw: any): number => {
-    if (typeof raw === "number" && Number.isFinite(raw)) return Math.trunc(raw);
-    if (typeof raw === "string" && /^\d+$/.test(raw)) return Math.trunc(parseInt(raw, 10));
-    return typeof currentTick === "number" ? currentTick : 0;
-  };
-
-  const out: QueueRow[] = [];
-  const idxByGuard = new Map<string, number>();
-
-  for (const raw of Array.isArray(queue) ? queue : []) {
-    const gid = toId(raw?.guardId, knownIds, byName);
-    const sec = String(raw?.returnTo ?? "");
-    if (!gid || !knownIds.has(gid)) continue;
-    if (!SECTIONS.includes(sec)) continue;
-
-    const tickRaw = coerceTick((raw as any)?.enteredTick);
-     const tick = tickRaw;
-
-    if (idxByGuard.has(gid)) {
-      const i = idxByGuard.get(gid)!;
-      if (tick >= out[i].enteredTick) {
-        out[i].enteredTick = tick;
-        out[i].returnTo = sec;
-      }
-    } else {
-      idxByGuard.set(gid, out.length);
-      out.push({ guardId: gid, returnTo: sec, enteredTick: tick });
-    }
-  }
-
-  return out;
-}
 
 async function loadQueue(
   date: string,

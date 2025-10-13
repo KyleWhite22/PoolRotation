@@ -5,27 +5,30 @@
   "author": "Kyle White",
   "license": "MIT",
   "main": "dist/server.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.895.0",
-    "@aws-sdk/lib-dynamodb": "^3.895.0",
+    "@aws-sdk/client-dynamodb": "^3.908.0",
+    "@aws-sdk/lib-dynamodb": "^3.908.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.21.2",
+    "serverless-http": "^4.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.155",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.23",
-    "@types/node": "^20.11.19",
+    "@types/node": "^20.19.21",
     "nodemon": "^3.1.10",
+    "serverless": "^4.21.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.20.5",
-    "typescript": "^5.4.5"
+    "typescript": "^5.9.3"
   }
 }

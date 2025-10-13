@@ -1,6 +1,6 @@
 {
   "type": "module",
-   "scripts": {
+  "scripts": {
     "dev": "npm-run-all -p dev:server dev:client",
     "dev:server": "npm --prefix backend run dev",
     "dev:client": "npm --prefix client run dev",
@@ -12,6 +12,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "serverless-http": "^4.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
