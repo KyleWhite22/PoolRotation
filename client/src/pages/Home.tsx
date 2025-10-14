@@ -768,32 +768,31 @@ export default function Home() {
 // Put this helper near your other utils
 async function nukeSiteDataAndReload() {
   try {
-    // Clear storages
+    // 1️⃣ Clear all browser storage
     localStorage.clear();
     sessionStorage.clear();
 
-    // Clear Service Worker caches (if any)
-    if ('caches' in window) {
-      const names = await caches.keys();
-      await Promise.all(names.map(n => caches.delete(n)));
+    // 2️⃣ Clear all caches (used by service workers)
+    if ("caches" in window) {
+      const cacheNames = await caches.keys();
+      await Promise.all(cacheNames.map((n) => caches.delete(n)));
     }
 
-    // Unregister Service Workers so old bundles don’t get served
-    if ('serviceWorker' in navigator) {
+    // 3️⃣ Unregister any active service workers
+    if ("serviceWorker" in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map(r => r.unregister()));
+      for (const reg of regs) await reg.unregister();
     }
   } catch (err) {
-    console.warn('Full site-data clear had a non-fatal error:', err);
+    console.warn("Failed to fully clear site data:", err);
   } finally {
-    // Hard reload with a cache-buster to ensure fresh assets
+    // 4️⃣ Force a full reload (bypasses cache)
     const { origin, pathname } = window.location;
     window.location.replace(`${origin}${pathname}?r=${Date.now()}`);
   }
 }
-const handleReset = async (opts?: { full?: boolean }) => {
-  const full = !!opts?.full;
 
+const handleReset = async () => {
   const reset = new Date(simulatedNow);
   reset.setHours(12, 0, 0, 0);
   setSimulatedNow(reset);
@@ -812,22 +811,6 @@ const handleReset = async (opts?: { full?: boolean }) => {
   setOnDutyIds(resetOnDuty);
 
   const day = ymdLocal(reset);
-
-  // Only persist snapshot if NOT doing full nuke (since we’re about to clear it)
-  if (!full) {
-    const snap: DaySnapshot = {
-      assigned: resetAssigned,
-      breakQueue: resetQueue,
-      breaks: resetBreaks,
-      conflicts: resetConflicts,
-      onDutyIds: [...resetOnDuty],
-      simulatedNowISO: reset.toISOString(),
-    };
-    try {
-      saveSnapshot(day, snap);
-      localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds));
-    } catch {}
-  }
 
   try {
     const time = new Date().toISOString().slice(11, 16);
@@ -857,11 +840,10 @@ const handleReset = async (opts?: { full?: boolean }) => {
     console.warn("Backend reset failed (continuing client reset):", e);
   }
 
-  // If full wipe requested, clear site data & reload last
-  if (full) {
-    await nukeSiteDataAndReload(); // does not return
-  }
+  // 🔥 Always do full site-data clear after backend reset
+  await nukeSiteDataAndReload();
 };
+
 
 
   const autopopulate = async () => {
