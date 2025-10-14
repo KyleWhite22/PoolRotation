@@ -765,84 +765,33 @@ export default function Home() {
       setBreakQueue([]);
     }
   };
-// Put this helper near your other utils
-async function nukeSiteDataAndReload() {
+
+const handleReset = async () => {
   try {
-    // 1️⃣ Clear all browser storage
+    // 1️⃣ Clear all local/session storage
     localStorage.clear();
     sessionStorage.clear();
 
-    // 2️⃣ Clear all caches (used by service workers)
-    if ("caches" in window) {
-      const cacheNames = await caches.keys();
-      await Promise.all(cacheNames.map((n) => caches.delete(n)));
+    // 2️⃣ Clear service-worker caches
+    if ('caches' in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map(n => caches.delete(n)));
     }
 
-    // 3️⃣ Unregister any active service workers
-    if ("serviceWorker" in navigator) {
+    // 3️⃣ Unregister any service workers
+    if ('serviceWorker' in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
       for (const reg of regs) await reg.unregister();
     }
   } catch (err) {
-    console.warn("Failed to fully clear site data:", err);
+    console.warn('Full site-data clear failed:', err);
   } finally {
-    // 4️⃣ Force a full reload (bypasses cache)
+    // 4️⃣ Hard reload (forces fresh JS, CSS, API_BASE, etc.)
     const { origin, pathname } = window.location;
     window.location.replace(`${origin}${pathname}?r=${Date.now()}`);
   }
-}
-
-const handleReset = async () => {
-  const reset = new Date(simulatedNow);
-  reset.setHours(12, 0, 0, 0);
-  setSimulatedNow(reset);
-
-  const allIds = guards.map((g) => g.id).filter(Boolean);
-  const resetAssigned = emptyAssigned();
-  const resetQueue: QueueEntry[] = [];
-  const resetBreaks: BreakState = {};
-  const resetConflicts: ConflictUI[] = [];
-  const resetOnDuty = new Set(allIds);
-
-  setAssigned(resetAssigned);
-  setBreakQueue(resetQueue);
-  setBreaks(resetBreaks);
-  setConflicts(resetConflicts);
-  setOnDutyIds(resetOnDuty);
-
-  const day = ymdLocal(reset);
-
-  try {
-    const time = new Date().toISOString().slice(11, 16);
-    await Promise.allSettled([
-      ...POSITIONS.map((p) =>
-        apiFetch(`/api/rotations/slot`, {
-          method: "POST",
-          headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
-          body: JSON.stringify({
-            date: day,
-            time,
-            stationId: p.id,
-            guardId: null,
-            notes: "reset-all",
-          }),
-          cache: "no-store" as RequestCache,
-        })
-      ),
-      apiFetch(`/api/plan/queue-clear`, {
-        method: "POST",
-        headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
-        body: JSON.stringify({ date: day }),
-        cache: "no-store" as RequestCache,
-      }),
-    ]);
-  } catch (e) {
-    console.warn("Backend reset failed (continuing client reset):", e);
-  }
-
-  // 🔥 Always do full site-data clear after backend reset
-  await nukeSiteDataAndReload();
 };
+
 
 
 
