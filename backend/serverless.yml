@@ -4,7 +4,7 @@ useDotenv: true
 
 provider:
   name: aws
-  runtime: nodejs18.x
+  runtime: nodejs20.x
   region: ${env:BACKEND_REGION, 'us-east-1'}
   stage: ${env:STAGE, 'prod'}
   memorySize: 256
@@ -13,10 +13,10 @@ provider:
     name: serverless-deploy-hgm-prod-us-east-1
     blockPublicAccess: true
     serverSideEncryption: AES256
-    skipPolicySetup: true 
+    skipPolicySetup: true
   environment:
     TABLE: PoolRotation
-    DDB_REGION: us-east-2      # <-- must match where the table actually lives
+    DDB_REGION: us-east-2
   iam:
     role:
       statements:
@@ -37,31 +37,38 @@ provider:
         - https://app.hilliardguardmanager.com
         - http://localhost:5173
         - http://localhost:5174
-      allowedMethods: [GET, POST, PUT, DELETE, OPTIONS]
-      allowedHeaders: [Content-Type, Authorization, X-Requested-With]
+      allowedMethods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - OPTIONS
+      allowedHeaders:
+        - Content-Type
+        - x-api-key
+        - x-rotation-instance
+        - Cache-Control
+        - Pragma
+        - Accept
+        - Origin
+        - X-Requested-With
+      allowCredentials: false
       maxAge: 86400
     metrics: true
 
-# ✅ Package only compiled JS (dist) + deps; exclude src/**
 package:
   patterns:
-    - dist/**            # compiled output
-    - node_modules/**    # deps
+    - dist/**
+    - node_modules/**
     - package.json
     - package-lock.json
-    - '!src/**'          # exclude TS sources
-    - '!.tsbuildinfo'    # ignore TS build info if present
+    - '!src/**'
+    - '!.tsbuildinfo'
 
 functions:
   api:
-    # ✅ Point Lambda to compiled JS
     handler: dist/handlers/app.handler
     events:
-      - httpApi:
-          path: /
-          method: ANY
-      - httpApi:
-          path: /{proxy+}
-          method: ANY
+      - httpApi: '*'
 
-plugins: []   # keep empty; do not use serverless-esbuild with v4
+plugins: []

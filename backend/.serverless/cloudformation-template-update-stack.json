@@ -5,7 +5,7 @@
     "ApiLogGroup": {
       "Type": "AWS::Logs::LogGroup",
       "Properties": {
-        "LogGroupName": "/aws/lambda/hilliard-guard-manager-backend-prod-api"
+        "LogGroupName": "/aws/lambda/hilliard-guard-manager-backend-tmpcors-api"
       }
     },
     "IamRoleLambdaExecution": {
@@ -34,7 +34,7 @@
                 "-",
                 [
                   "hilliard-guard-manager-backend",
-                  "prod",
+                  "tmpcors",
                   "lambda"
                 ]
               ]
@@ -51,7 +51,7 @@
                   ],
                   "Resource": [
                     {
-                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/hilliard-guard-manager-backend-prod*:*"
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/hilliard-guard-manager-backend-tmpcors*:*"
                     }
                   ]
                 },
@@ -62,7 +62,7 @@
                   ],
                   "Resource": [
                     {
-                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/hilliard-guard-manager-backend-prod*:*:*"
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/hilliard-guard-manager-backend-tmpcors*:*:*"
                     }
                   ]
                 },
@@ -91,7 +91,7 @@
             "-",
             [
               "hilliard-guard-manager-backend",
-              "prod",
+              "tmpcors",
               {
                 "Ref": "AWS::Region"
               },
@@ -106,11 +106,11 @@
       "Properties": {
         "Code": {
           "S3Bucket": "serverless-deploy-hgm-prod-us-east-1",
-          "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760416685803-2025-10-14T04:38:05.803Z/hilliard-guard-manager-backend.zip"
+          "S3Key": "serverless/hilliard-guard-manager-backend/tmpcors/1760419233080-2025-10-14T05:20:33.080Z/hilliard-guard-manager-backend.zip"
         },
         "Handler": "dist/handlers/app.handler",
-        "Runtime": "nodejs18.x",
-        "FunctionName": "hilliard-guard-manager-backend-prod-api",
+        "Runtime": "nodejs20.x",
+        "FunctionName": "hilliard-guard-manager-backend-tmpcors-api",
         "MemorySize": 256,
         "Timeout": 15,
         "Environment": {
@@ -130,25 +130,30 @@
         "ApiLogGroup"
       ]
     },
-    "ApiLambdaVersionYnbXZuCnfBuzCaZc143eAvdDQRVC3lkxLjuX6xJyk": {
+    "ApiLambdaVersion3e7j0iGTbonrUSSQ5dozm7n1zFRqHDtx8tdxUuTVUik": {
       "Type": "AWS::Lambda::Version",
       "DeletionPolicy": "Retain",
       "Properties": {
         "FunctionName": {
           "Ref": "ApiLambdaFunction"
         },
-        "CodeSha256": "Nwm9q+w6LOB31Qjd/AdvBoxd0wumGOWJNLVSbI0iuoQ="
+        "CodeSha256": "Mhl6KXZFoVkqZdvb3GvlHnTIIK/n96euZwkrPXWU+A4="
       }
     },
     "HttpApi": {
       "Type": "AWS::ApiGatewayV2::Api",
       "Properties": {
-        "Name": "prod-hilliard-guard-manager-backend",
+        "Name": "tmpcors-hilliard-guard-manager-backend",
         "ProtocolType": "HTTP",
         "CorsConfiguration": {
           "AllowHeaders": [
             "Content-Type",
-            "Authorization",
+            "x-api-key",
+            "x-rotation-instance",
+            "Cache-Control",
+            "Pragma",
+            "Accept",
+            "Origin",
             "X-Requested-With"
           ],
           "AllowMethods": [
@@ -234,34 +239,13 @@
         "TimeoutInMillis": 30000
       }
     },
-    "HttpApiRouteAny": {
+    "HttpApiRouteDefault": {
       "Type": "AWS::ApiGatewayV2::Route",
       "Properties": {
         "ApiId": {
           "Ref": "HttpApi"
         },
-        "RouteKey": "ANY /",
-        "Target": {
-          "Fn::Join": [
-            "/",
-            [
-              "integrations",
-              {
-                "Ref": "HttpApiIntegrationApi"
-              }
-            ]
-          ]
-        }
-      },
-      "DependsOn": "HttpApiIntegrationApi"
-    },
-    "HttpApiRouteAnyProxyVar": {
-      "Type": "AWS::ApiGatewayV2::Route",
-      "Properties": {
-        "ApiId": {
-          "Ref": "HttpApi"
-        },
-        "RouteKey": "ANY /{proxy+}",
+        "RouteKey": "$default",
         "Target": {
           "Fn::Join": [
             "/",
@@ -281,16 +265,16 @@
     "ServerlessDeploymentBucketName": {
       "Value": "serverless-deploy-hgm-prod-us-east-1",
       "Export": {
-        "Name": "sls-hilliard-guard-manager-backend-prod-ServerlessDeploymentBucketName"
+        "Name": "sls-hilliard-guard-manager-backend-tmpcors-ServerlessDeploymentBucketName"
       }
     },
     "ApiLambdaFunctionQualifiedArn": {
       "Description": "Current Lambda function version",
       "Value": {
-        "Ref": "ApiLambdaVersionYnbXZuCnfBuzCaZc143eAvdDQRVC3lkxLjuX6xJyk"
+        "Ref": "ApiLambdaVersion3e7j0iGTbonrUSSQ5dozm7n1zFRqHDtx8tdxUuTVUik"
       },
       "Export": {
-        "Name": "sls-hilliard-guard-manager-backend-prod-ApiLambdaFunctionQualifiedArn"
+        "Name": "sls-hilliard-guard-manager-backend-tmpcors-ApiLambdaFunctionQualifiedArn"
       }
     },
     "HttpApiId": {
@@ -299,7 +283,7 @@
         "Ref": "HttpApi"
       },
       "Export": {
-        "Name": "sls-hilliard-guard-manager-backend-prod-HttpApiId"
+        "Name": "sls-hilliard-guard-manager-backend-tmpcors-HttpApiId"
       }
     },
     "HttpApiUrl": {
@@ -324,7 +308,7 @@
         ]
       },
       "Export": {
-        "Name": "sls-hilliard-guard-manager-backend-prod-HttpApiUrl"
+        "Name": "sls-hilliard-guard-manager-backend-tmpcors-HttpApiUrl"
       }
     }
   }
