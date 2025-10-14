@@ -440,18 +440,21 @@ const rnd = mulberry32(seed);
   }
 shuffleInPlace(minors, rnd);
 shuffleInPlace(adults, rnd);
-  const take = (arr: string[]) => (arr.length ? arr.shift()! : null);
-  const takeAdult = () => take(adults);
-  const takeMinor = () => take(minors);
-  const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } => {
-    if (pref === "adult") {
-      const a = takeAdult();
-      return { id: a, tag: a ? "A" : "none" };
-    } else {
-      const m = takeMinor();
-      return { id: m, tag: m ? "M" : "none" };
-    }
-  };
+  const takeRandom = (arr: string[]) =>
+  arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null;
+
+const takeAdult = () => takeRandom(adults);
+const takeMinor = () => takeRandom(minors);
+
+const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } => {
+  if (pref === "adult") {
+    const a = takeAdult();
+    return { id: a, tag: a ? "A" : "none" };
+  } else {
+    const m = takeMinor();
+    return { id: m, tag: m ? "M" : "none" };
+  }
+};
 
   // Per-section fill (entry -> middle -> rest -> tail)
   for (const s of sectionIds) {
