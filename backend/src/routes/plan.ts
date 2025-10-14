@@ -334,6 +334,31 @@ router.post("/queue-set", async (req: any, res) => {
 
   res.json({ ok: true, queue: saved.queue || [] });
 });
+// String -> 32-bit seed
+function hashSeed(s: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+// Simple fast PRNG (mulberry32)
+function mulberry32(a: number) {
+  return function () {
+    let t = (a += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Fisher–Yates with injectable RNG
+function shuffleInPlace<T>(arr: T[], rnd: () => number) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+}
 
 // ============================================================================
 // POST /api/plan/autopopulate  (per-instance)
@@ -356,7 +381,8 @@ router.post("/autopopulate", async (req: any, res) => {
   const allowedIds: string[] = rawAllowed
     .map((v) => toIdLoose(v, knownIds, byName))
     .filter(Boolean) as string[];
-
+const seed = hashSeed(`${date}|${currentTick}|${allowedIds.join(",")}`);
+const rnd = mulberry32(seed);
   // Seats: client snapshot wins if provided; fallback to server
   const serverAssigned = await readAssigned(req, date);
   const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<
@@ -410,7 +436,8 @@ router.post("/autopopulate", async (req: any, res) => {
     if (age !== null && age <= 15) minors.push(id);
     else adults.push(id);
   }
-
+shuffleInPlace(minors, rnd);
+shuffleInPlace(adults, rnd);
   const take = (arr: string[]) => (arr.length ? arr.shift()! : null);
   const takeAdult = () => take(adults);
   const takeMinor = () => take(minors);
