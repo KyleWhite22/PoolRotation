@@ -10,11 +10,6 @@ import type { Guard } from "../lib/types";
 import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
 import { apiFetch } from "../lib/api";
 
-const API_BASE =
-  location.hostname.includes("localhost")
-    ? "http://localhost:3000"
-    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
-
 // -------- Local helpers / types --------
 type Assigned = Record<string, string | null>;
 type BreakState = Record<string, string>;
@@ -241,7 +236,7 @@ export default function Home() {
     const silent = !!opts?.silent;
     if (!silent) setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/guards`, {
+      const res = await apiFetch(`/api/guards`, {
         headers: { "x-api-key": "dev-key-123" },
       });
       if (!res.ok) throw new Error(`GET /api/guards ${res.status}`);
@@ -359,7 +354,7 @@ export default function Home() {
       returnTo: q.returnTo,
       enteredTick: q.enteredTick,
     }));
-    await apiFetch(`/api/queue-set`, {
+    await apiFetch(`/api/plan/queue-set`, {
       method: "POST",
       headers: { "x-api-key": "dev-key-123" },
       body: JSON.stringify({ date: dayKey, queue: payload }),
@@ -367,7 +362,7 @@ export default function Home() {
   };
 
   const fetchQueue = async () => {
-    const res = await apiFetch(`/api/queue?date=${dayKey}`, {
+    const res = await apiFetch(`/api/plan/queue?date=${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const data = await res.json();
@@ -488,7 +483,7 @@ export default function Home() {
     const gid = toId(guardId);
     if (!gid) return;
     try {
-      await apiFetch(`/api/queue-add`, {
+      await apiFetch(`/api/plan/queue-add`, {
         method: "POST",
         headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({
@@ -700,7 +695,7 @@ export default function Home() {
       const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
       setSimulatedNow(newNow);
 
-      const res = await apiFetch(`/api/rotate`, {
+      const res = await apiFetch(`/api/plan/rotate`, {
         method: "POST",
         headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({
@@ -759,7 +754,7 @@ export default function Home() {
   // Clears queues both server- and client-side
   const handleClearQueues = async () => {
     try {
-      await apiFetch(`/api/queue-clear`, {
+      await apiFetch(`/api/plan/queue-clear`, {
         method: "POST",
         headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({ date: dayKey }),
@@ -820,7 +815,7 @@ export default function Home() {
             cache: "no-store" as RequestCache,
           })
         ),
-        apiFetch(`/api/queue-clear?v=` + Date.now(), {
+        apiFetch(`/api/plan/queue-clear?v=` + Date.now(), {
           method: "POST",
           headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
           body: JSON.stringify({ date: day }),
@@ -847,7 +842,7 @@ export default function Home() {
         (id) => knownIds.has(id) || isUuid(String(id))
       );
 
-      const res = await apiFetch(`/api/autopopulate`, {
+      const res = await apiFetch(`/api/plan/autopopulate`, {
         method: "POST",
         headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({

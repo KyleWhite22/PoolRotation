@@ -106,7 +106,7 @@
       "Properties": {
         "Code": {
           "S3Bucket": "serverless-deploy-hgm-prod-us-east-1",
-          "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760405470883-2025-10-14T01:31:10.883Z/hilliard-guard-manager-backend.zip"
+          "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760405755059-2025-10-14T01:35:55.059Z/hilliard-guard-manager-backend.zip"
         },
         "Handler": "dist/handlers/app.handler",
         "Runtime": "nodejs18.x",
@@ -130,14 +130,14 @@
         "ApiLogGroup"
       ]
     },
-    "ApiLambdaVersion8n53MnMqa8cLvRAt0QnoWM6fsIMyd4tCbnueygHs": {
+    "ApiLambdaVersionup8p61t9PyIwjZHn4WOiHS5kh4brhB8pMEj8UC9crG0": {
       "Type": "AWS::Lambda::Version",
       "DeletionPolicy": "Retain",
       "Properties": {
         "FunctionName": {
           "Ref": "ApiLambdaFunction"
         },
-        "CodeSha256": "6Ikl6Z2TakQo1sUO6GKDcwTBfnUi4CKr5S1cjcW8ws8="
+        "CodeSha256": "92XNb6Xp6h505UCV9FL5jMF5A6LsBBwKgZqe1nXi9K0="
       }
     },
     "HttpApi": {
@@ -287,7 +287,7 @@
     "ApiLambdaFunctionQualifiedArn": {
       "Description": "Current Lambda function version",
       "Value": {
-        "Ref": "ApiLambdaVersion8n53MnMqa8cLvRAt0QnoWM6fsIMyd4tCbnueygHs"
+        "Ref": "ApiLambdaVersionup8p61t9PyIwjZHn4WOiHS5kh4brhB8pMEj8UC9crG0"
       },
       "Export": {
         "Name": "sls-hilliard-guard-manager-backend-prod-ApiLambdaFunctionQualifiedArn"

@@ -1,78 +1,92 @@
 // server.ts
 import "dotenv/config";
 import express from "express";
-import cors from "cors";
+import cors, { CorsOptions } from "cors";
 import { sandboxResolver } from "./middleware/sandbox";
 
 export function createApp() {
   const app = express();
 
-  app.use(
-    cors({
-      origin: [
-        "https://app.hilliardguardmanager.com",
-        "http://localhost:5173",
-        "http://localhost:5174",
-      ],
-      credentials: true,
-    })
-  );
-  app.use(express.json({ limit: "1mb" }));
-app.use(sandboxResolver);
+  // ---- CORS ----
+  const ALLOW_ORIGINS = [
+    "https://app.hilliardguardmanager.com",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:3000",
+  ];
+  const ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"];
+  const ALLOW_HEADERS = ["Content-Type", "x-api-key", "x-rotation-instance"];
 
-  // Simple probes
+  const corsOptions: CorsOptions = {
+    origin: (origin, cb) => {
+      // allow same-origin tools (curl/postman) where origin may be undefined
+      if (!origin || ALLOW_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    methods: ALLOW_METHODS,
+    allowedHeaders: ALLOW_HEADERS,
+    credentials: false, // set true only if you use cookies/auth cookies
+    optionsSuccessStatus: 204,
+  };
+
+  // Always vary on Origin to avoid cache confusion
+  app.use((req, res, next) => {
+    res.setHeader("Vary", "Origin");
+    next();
+  });
+
+  app.use(cors(corsOptions));
+  // Make sure preflight requests are handled
+  app.options("*", cors(corsOptions));
+
+  // ---- Body parsing & sandbox ----
+  app.use(express.json({ limit: "1mb" }));
+  app.use(sandboxResolver);
+
+  // ---- Probes ----
   app.get("/", (_req, res) =>
     res.json({ ok: true, service: "hgm-backend", time: new Date().toISOString() })
   );
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
-  // Debug: list mounted routes (only top-level paths)
-// put this inside createApp(), after /health and before the error handler
-app.get("/__routes", (_req, res) => {
-  type Layer = any;
+  // ---- Debug: list mounted routes ----
+  app.get("/__routes", (_req, res) => {
+    type Layer = any;
 
-  const getRoutes = (stack: Layer[], prefix = ""): Array<{ path: string; methods: string[] }> => {
-    const out: Array<{ path: string; methods: string[] }> = [];
-    for (const layer of stack) {
-      // Direct route on the app (has .route)
-      if (layer.route) {
-        const methods = Object.keys(layer.route.methods || {});
-        out.push({ path: prefix + layer.route.path, methods });
-        continue;
-      }
-      // Mounted router (has .handle.stack)
-      if (layer.name === "router" && layer.handle?.stack) {
-        // Extract the mount path segment if present
-        let mount = "";
-        if (layer.regexp && layer.regexp.fast_star) {
-          mount = "*";
-        } else if (layer.regexp && layer.regexp.fast_slash) {
-          mount = "/";
-        } else if (Array.isArray(layer.keys) && layer.keys.length) {
-          // parametric mount (e.g., /api/:v)
-          mount = "/" + layer.keys.map((k: any) => (k?.name ? `:${k.name}` : "")).join("/");
-        } else if (typeof layer?.regexp?.toString === "function") {
-          // best-effort stringify for static mounts
-          const m = layer.regexp.toString().match(/\\\/([^\\^$?()]*)\\\//);
-          if (m && m[1]) mount = "/" + m[1];
+    const getRoutes = (stack: Layer[], prefix = ""): Array<{ path: string; methods: string[] }> => {
+      const out: Array<{ path: string; methods: string[] }> = [];
+      for (const layer of stack) {
+        if (layer.route) {
+          const methods = Object.keys(layer.route.methods || {});
+          out.push({ path: prefix + layer.route.path, methods });
+          continue;
         }
-        out.push(...getRoutes(layer.handle.stack, prefix + mount));
+        if (layer.name === "router" && layer.handle?.stack) {
+          let mount = "";
+          if (layer.regexp && layer.regexp.fast_star) mount = "*";
+          else if (layer.regexp && layer.regexp.fast_slash) mount = "/";
+          else if (Array.isArray(layer.keys) && layer.keys.length) {
+            mount = "/" + layer.keys.map((k: any) => (k?.name ? `:${k.name}` : "")).join("/");
+          } else if (typeof layer?.regexp?.toString === "function") {
+            const m = layer.regexp.toString().match(/\\\/([^\\^$?()]*)\\\//);
+            if (m && m[1]) mount = "/" + m[1];
+          }
+          out.push(...getRoutes(layer.handle.stack, prefix + mount));
+        }
       }
-    }
-    return out;
-  };
+      return out;
+    };
 
-  // @ts-ignore
-  const stack = app._router?.stack || [];
-  const routes = getRoutes(stack).map(r => ({
-    path: r.path.replace(/\/+/g, "/"),
-    methods: r.methods.sort(),
-  }));
-  res.json(routes);
-});
+    // @ts-ignore
+    const stack = app._router?.stack || [];
+    const routes = getRoutes(stack).map((r) => ({
+      path: r.path.replace(/\/+/g, "/"),
+      methods: r.methods.sort(),
+    }));
+    res.json(routes);
+  });
 
-
-  // Lazy-load routers so a bad import won't kill the whole Lambda
+  // ---- Lazy-load routers ----
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const guardMod = require("./routes/guard");
@@ -92,22 +106,27 @@ app.get("/__routes", (_req, res) => {
     const planRoutes = planMod.default ?? planMod;
     const devRouter = devMod.default ?? devMod;
 
-console.log("[bootstrap] mounting routers...");
-app.use("/api/guards", guardRoutes);
-app.use("/api/rotations", rotationRoutes);
-app.use("/api/plan", planRoutes);
-app.use("/api/dev", devRouter);
-console.log("[bootstrap] routers mounted");
-
+    console.log("[bootstrap] mounting routers...");
+    app.use("/api/guards", guardRoutes);
+    app.use("/api/rotations", rotationRoutes);
+    app.use("/api/plan", planRoutes);
+    app.use("/api/dev", devRouter);
     console.log("[bootstrap] routers mounted");
   } catch (err: any) {
     console.error("[bootstrap.routes] failed to load routes:", err?.stack || err);
   }
 
-  // Global error handler (keeps JSON errors consistent)
+  // ---- Global error handler (JSON & CORS on errors too) ----
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     console.error("Express error:", err);
+    const origin = req.headers.origin;
+    if (origin && ALLOW_ORIGINS.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Headers", ALLOW_HEADERS.join(","));
+      res.setHeader("Access-Control-Allow-Methods", ALLOW_METHODS.join(","));
+      res.setHeader("Vary", "Origin");
+    }
     res.status(500).json({ error: String(err?.message ?? err) });
   });
 
