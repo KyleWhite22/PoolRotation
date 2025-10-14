@@ -765,26 +765,56 @@ export default function Home() {
       setBreakQueue([]);
     }
   };
+// Put this helper near your other utils
+async function nukeSiteDataAndReload() {
+  try {
+    // Clear storages
+    localStorage.clear();
+    sessionStorage.clear();
 
-  const handleReset = async () => {
-    const reset = new Date(simulatedNow);
-    reset.setHours(12, 0, 0, 0);
-    setSimulatedNow(reset);
+    // Clear Service Worker caches (if any)
+    if ('caches' in window) {
+      const names = await caches.keys();
+      await Promise.all(names.map(n => caches.delete(n)));
+    }
 
-    const allIds = guards.map((g) => g.id).filter(Boolean);
-    const resetAssigned = emptyAssigned();
-    const resetQueue: QueueEntry[] = [];
-    const resetBreaks: BreakState = {};
-    const resetConflicts: ConflictUI[] = [];
-    const resetOnDuty = new Set(allIds);
+    // Unregister Service Workers so old bundles don’t get served
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch (err) {
+    console.warn('Full site-data clear had a non-fatal error:', err);
+  } finally {
+    // Hard reload with a cache-buster to ensure fresh assets
+    const { origin, pathname } = window.location;
+    window.location.replace(`${origin}${pathname}?r=${Date.now()}`);
+  }
+}
+const handleReset = async (opts?: { full?: boolean }) => {
+  const full = !!opts?.full;
 
-    setAssigned(resetAssigned);
-    setBreakQueue(resetQueue);
-    setBreaks(resetBreaks);
-    setConflicts(resetConflicts);
-    setOnDutyIds(resetOnDuty);
+  const reset = new Date(simulatedNow);
+  reset.setHours(12, 0, 0, 0);
+  setSimulatedNow(reset);
 
-    const day = ymdLocal(reset);
+  const allIds = guards.map((g) => g.id).filter(Boolean);
+  const resetAssigned = emptyAssigned();
+  const resetQueue: QueueEntry[] = [];
+  const resetBreaks: BreakState = {};
+  const resetConflicts: ConflictUI[] = [];
+  const resetOnDuty = new Set(allIds);
+
+  setAssigned(resetAssigned);
+  setBreakQueue(resetQueue);
+  setBreaks(resetBreaks);
+  setConflicts(resetConflicts);
+  setOnDutyIds(resetOnDuty);
+
+  const day = ymdLocal(reset);
+
+  // Only persist snapshot if NOT doing full nuke (since we’re about to clear it)
+  if (!full) {
     const snap: DaySnapshot = {
       assigned: resetAssigned,
       breakQueue: resetQueue,
@@ -797,35 +827,42 @@ export default function Home() {
       saveSnapshot(day, snap);
       localStorage.setItem(`onDuty:${day}`, JSON.stringify(snap.onDutyIds));
     } catch {}
+  }
 
-    try {
-      const time = new Date().toISOString().slice(11, 16);
-      await Promise.allSettled([
-        ...POSITIONS.map((p) =>
-          apiFetch(`/api/rotations/slot`, {
-            method: "POST",
-            headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
-            body: JSON.stringify({
-              date: day,
-              time,
-              stationId: p.id,
-              guardId: null,
-              notes: "reset-all",
-            }),
-            cache: "no-store" as RequestCache,
-          })
-        ),
-        apiFetch(`/api/plan/queue-clear`, {
+  try {
+    const time = new Date().toISOString().slice(11, 16);
+    await Promise.allSettled([
+      ...POSITIONS.map((p) =>
+        apiFetch(`/api/rotations/slot`, {
           method: "POST",
           headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
-          body: JSON.stringify({ date: day }),
+          body: JSON.stringify({
+            date: day,
+            time,
+            stationId: p.id,
+            guardId: null,
+            notes: "reset-all",
+          }),
           cache: "no-store" as RequestCache,
-        }),
-      ]);
-    } catch (e) {
-      console.warn("Backend reset failed (continuing client reset):", e);
-    }
-  };
+        })
+      ),
+      apiFetch(`/api/plan/queue-clear`, {
+        method: "POST",
+        headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
+        body: JSON.stringify({ date: day }),
+        cache: "no-store" as RequestCache,
+      }),
+    ]);
+  } catch (e) {
+    console.warn("Backend reset failed (continuing client reset):", e);
+  }
+
+  // If full wipe requested, clear site data & reload last
+  if (full) {
+    await nukeSiteDataAndReload(); // does not return
+  }
+};
+
 
   const autopopulate = async () => {
     setIsAutofilling(true);
