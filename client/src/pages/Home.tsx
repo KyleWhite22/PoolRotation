@@ -837,8 +837,13 @@ const handleReset = async () => {
             updates[seat] = toId(raw);
           }
         }
-        setAssigned((prev) => ({ ...prev, ...updates } as Assigned));
-      }
+if (data?.assigned && typeof data.assigned === "object") {
+  const next: Assigned = emptyAssigned();
+  for (const [seat, raw] of Object.entries(data.assigned)) {
+    next[seat] = toId(raw);
+  }
+  setAssigned(next); // <-- full replace
+}      }
 
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);

@@ -562,13 +562,20 @@ const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string }
     sectionIds.map((s) => [s, (saved.queue || []).filter((q) => q.returnTo === s)])
   );
 
-  res.json({
-    assigned: saved.assigned,
-    breaks: saved.breaks || {},
-    conflicts: saved.conflicts || [],
-    meta: { period: "ALL_AGES", breakQueue: saved.queue || [], queuesBySection },
-    nowISO,
-  });
+  const debug = {
+  seed,
+  pickedFirst3: Object.values(seatsSnapshot).filter(Boolean).slice(0,3),
+  minorsSize: minors.length,
+  adultsSize: adults.length,
+};
+
+res.json({
+  assigned: saved.assigned,
+  breaks: saved.breaks || {},
+  conflicts: saved.conflicts || [],
+  meta: { period: "ALL_AGES", breakQueue: saved.queue || [], queuesBySection, debug },
+  nowISO,
+});
 });
 
 export default router;
