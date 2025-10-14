@@ -6,7 +6,7 @@ import AppShell from "../components/AppShell";
 const API_BASE =
   location.hostname.includes("localhost")
     ? "http://localhost:3000"
-    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
+    : "https://vjhz9pp9f9.execute-api.us-east-1.amazonaws.com";
 
 // --- Types ---
 type Guard = {

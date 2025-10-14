@@ -20,7 +20,11 @@ const SANDBOX_TTL_SECS = Number(process.env.SANDBOX_TTL_DAYS || 7) * 24 * 3600;
 
 const router = Router();
 router.get("/_ping", (_req, res) => res.json({ ok: true, router: "plan" }));
-
+router.get("/_build", (_req, res) => {
+  const BUILD_TAG = "plan-autopopulate@2025-10-14-c";
+  res.setHeader("x-build", BUILD_TAG);
+  res.json({ ok: true, build: BUILD_TAG, t: Date.now() });
+});
 // Build key (used only for reference/logs)
 const keyFor = (req: any, date: string) => rotationKey(date, req.sandboxInstanceId);
 
@@ -561,21 +565,30 @@ const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string }
   const queuesBySection = Object.fromEntries(
     sectionIds.map((s) => [s, (saved.queue || []).filter((q) => q.returnTo === s)])
   );
+const BUILD_TAG = "plan-autopopulate@2025-10-14-c"; // bump each deploy
 
-  const debug = {
+const debug = {
+  build: BUILD_TAG,
   seed,
-  pickedFirst3: Object.values(seatsSnapshot).filter(Boolean).slice(0,3),
-  minorsSize: minors.length,
-  adultsSize: adults.length,
+  first3AssignedFromSeatsSnapshot: Object.values(seatsSnapshot).filter(Boolean).slice(0, 3),
+  minorsCount: minors.length,
+  adultsCount: adults.length,
 };
-
+res.setHeader("x-build", BUILD_TAG);
 res.json({
   assigned: saved.assigned,
   breaks: saved.breaks || {},
   conflicts: saved.conflicts || [],
-  meta: { period: "ALL_AGES", breakQueue: saved.queue || [], queuesBySection, debug },
+  meta: {
+    period: "ALL_AGES",
+    breakQueue: saved.queue || [],
+    queuesBySection,
+    debug: { build: BUILD_TAG, rand: Math.random() }, // <--- MUST be present in the live response
+  },
   nowISO,
 });
 });
+
+
 
 export default router;
