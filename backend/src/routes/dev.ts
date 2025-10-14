@@ -1,21 +1,28 @@
 /* eslint-disable no-console */
-//src/routes/dev.ts
+// src/routes/dev.ts
 import { Router } from "express";
 import {
   ScanCommand,
-  PutCommand,
   UpdateCommand,
+  PutCommand,
   type ScanCommandInput,
 } from "@aws-sdk/lib-dynamodb";
-import { ddb, TABLE } from "../db"; // 👈 no .js in TS source
+import { ddb, TABLE } from "../db"; // TS source (no .js)
 
 const router = Router();
 
 // ---------- types ----------
 type GuardRow = { pk: string; sk: "METADATA"; type: "Guard"; name?: string; dob?: string | null };
 type QueueEntry = { guardId: string; returnTo?: string; enteredTick?: number };
-type QueueItem = { pk: string; sk: "QUEUE"; queue?: QueueEntry[] };
-type SlotItem = { pk: string; sk: string; guardId?: string | null };
+type StateItem = {
+  pk: string;
+  sk: "STATE";
+  assigned?: Record<string, string | null>;
+  queue?: QueueEntry[];
+  rev?: number;
+  updatedAt?: Record<string, string>;
+  ttl?: number;
+};
 
 // ---------- helpers ----------
 const norm = (s: string) =>
@@ -43,7 +50,7 @@ async function loadGuardMaps() {
     ExpressionAttributeNames: {
       "#sk": "sk",
       "#type": "type",
-      "#name": "name", // 👈 must declare all aliases used below
+      "#name": "name",
     },
     ProjectionExpression: "pk, #sk, #type, #name, dob",
     ConsistentRead: true,
@@ -75,49 +82,64 @@ function toCanonicalId(
   return m && knownIds.has(m) ? m : null;
 }
 
-// ---------- DIAG: quick snapshot ----------
+// ---------- scan STATE rows (optionally for one date) ----------
+async function scanStateRows(date?: string) {
+  // We store state in rows where sk = "STATE" and pk begins with ROTATION#
+  // If a date is given, prefer ROTATION#${date}; this covers live and all #INSTANCE# rows.
+  const filterExpr = date
+    ? "begins_with(pk, :p) AND #sk = :sk"
+    : "begins_with(pk, :p) AND #sk = :sk";
+  const exprVals = date
+    ? { ":p": `ROTATION#${date}`, ":sk": "STATE" }
+    : { ":p": "ROTATION#", ":sk": "STATE" };
+
+  const rows = await scanAll<StateItem>({
+    TableName: TABLE,
+    FilterExpression: filterExpr,
+    ExpressionAttributeValues: exprVals,
+    ExpressionAttributeNames: { "#sk": "sk" },
+    ConsistentRead: true,
+  });
+
+  return rows;
+}
+
+// ---------- DIAG: quick snapshot over STATE items ----------
 router.get("/diag", async (req, res) => {
   try {
-    const { rows, knownIds, byName } = await loadGuardMaps();
-    const date = String(req.query?.date ?? "");
+    const { rows: roster, knownIds, byName } = await loadGuardMaps();
+    const date = String(req.query?.date ?? ""); // optional YYYY-MM-DD
 
-    const out: any = { rosterCount: rows.length, unknownQueue: 0, unknownSlots: 0, samples: [] };
+    const stateRows = await scanStateRows(date);
 
-    // Queues
-    const queues = await scanAll<QueueItem>({
-      TableName: TABLE,
-      FilterExpression: "begins_with(pk, :p) AND #sk = :q",
-      ExpressionAttributeValues: { ":p": date ? `ROTATION#${date}` : "ROTATION#", ":q": "QUEUE" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
+    const out: any = {
+      rosterCount: roster.length,
+      stateRowCount: stateRows.length,
+      unknownAssigned: 0,
+      unknownQueue: 0,
+      samples: [] as any[],
+    };
 
-    for (const q of queues) {
-      for (const row of q.queue ?? []) {
+    for (const st of stateRows) {
+      const assigned = st.assigned || {};
+      for (const [seat, gid] of Object.entries(assigned)) {
+        if (gid == null) continue;
+        const canon = toCanonicalId(gid, knownIds, byName);
+        if (!canon) {
+          out.unknownAssigned++;
+          if (out.samples.length < 10)
+            out.samples.push({ kind: "assigned", pk: st.pk, seat, bad: gid });
+        }
+      }
+
+      const q = Array.isArray(st.queue) ? st.queue : [];
+      for (const row of q) {
         const canon = toCanonicalId(row.guardId, knownIds, byName);
         if (!canon) {
           out.unknownQueue++;
           if (out.samples.length < 10)
-            out.samples.push({ kind: "queue", pk: q.pk, bad: row.guardId });
+            out.samples.push({ kind: "queue", pk: st.pk, bad: row.guardId });
         }
-      }
-    }
-
-    // Slots
-    const frames = await scanAll<SlotItem>({
-      TableName: TABLE,
-      FilterExpression: "begins_with(pk, :p) AND begins_with(#sk, :slot)",
-      ExpressionAttributeValues: { ":p": date ? `ROTATION#${date}` : "ROTATION#", ":slot": "SLOT#" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
-
-    for (const it of frames) {
-      const g = toCanonicalId(it.guardId, knownIds, byName);
-      if (it.guardId != null && !g) {
-        out.unknownSlots++;
-        if (out.samples.length < 10)
-          out.samples.push({ kind: "slot", pk: it.pk, sk: it.sk, bad: it.guardId });
       }
     }
 
@@ -128,79 +150,75 @@ router.get("/diag", async (req, res) => {
   }
 });
 
-// ---------- FIX: convert names → ids in queues & slots ----------
+// ---------- FIX: convert names → ids in STATE.assigned & STATE.queue ----------
 router.post("/fix-ids", async (req, res) => {
   try {
     const apply = String(req.query.apply ?? "0") === "1";
-    const date = String(req.query?.date ?? "");
+    const date = String(req.query?.date ?? ""); // optional YYYY-MM-DD
     const { knownIds, byName } = await loadGuardMaps();
+
+    const stateRows = await scanStateRows(date);
 
     let examined = 0;
     let changed = 0;
     const changes: any[] = [];
 
-    // Queues
-    const queues = await scanAll<QueueItem>({
-      TableName: TABLE,
-      FilterExpression: "begins_with(pk, :p) AND #sk = :q",
-      ExpressionAttributeValues: { ":p": date ? `ROTATION#${date}` : "ROTATION#", ":q": "QUEUE" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
-
-    for (const q of queues) {
+    for (const st of stateRows) {
       examined++;
-      const current = Array.isArray(q.queue) ? q.queue : [];
       let dirty = false;
 
-      const next = current.map((row) => {
+      // Fix assigned
+      const nextAssigned: Record<string, string | null> = { ...(st.assigned || {}) };
+      for (const [seat, gid] of Object.entries(nextAssigned)) {
+        if (gid == null) continue;
+        const canon = toCanonicalId(gid, knownIds, byName);
+        if (canon && canon !== stripId(gid)) {
+          nextAssigned[seat] = canon;
+          dirty = true;
+          changed++;
+          changes.push({ kind: "assigned", pk: st.pk, seat, from: gid, to: canon });
+        } else if (!canon) {
+          // If unresolvable, you can choose to null it or leave it. Here we leave it as-is for fix-ids.
+        }
+      }
+
+      // Fix queue
+      const currentQueue = Array.isArray(st.queue) ? st.queue : [];
+      const nextQueue: QueueEntry[] = currentQueue.map((row) => {
         const canon = toCanonicalId(row.guardId, knownIds, byName);
         if (canon && canon !== stripId(row.guardId)) {
           dirty = true;
           changed++;
-          changes.push({ kind: "queue", pk: q.pk, from: row.guardId, to: canon });
+          changes.push({ kind: "queue", pk: st.pk, from: row.guardId, to: canon });
           return { ...row, guardId: canon };
         }
         return row;
       });
 
-      if (dirty && apply) {
-        await ddb.send(
-          new PutCommand({
-            TableName: TABLE,
-            Item: { ...q, queue: next, updatedAt: new Date().toISOString() },
-          })
-        );
-      }
-    }
+      if (!dirty || !apply) continue;
 
-    // Slots
-    const frames = await scanAll<SlotItem>({
-      TableName: TABLE,
-      FilterExpression: "begins_with(pk, :p) AND begins_with(#sk, :slot)",
-      ExpressionAttributeValues: { ":p": date ? `ROTATION#${date}` : "ROTATION#", ":slot": "SLOT#" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
-
-    for (const it of frames) {
-      examined++;
-      const canon = toCanonicalId(it.guardId, knownIds, byName);
-      if (it.guardId != null && canon && canon !== stripId(it.guardId)) {
-        changed++;
-        changes.push({ kind: "slot", pk: it.pk, sk: it.sk, from: it.guardId, to: canon });
-        if (apply) {
-          await ddb.send(
-            new UpdateCommand({
-              TableName: TABLE,
-              Key: { pk: it.pk, sk: it.sk },
-              UpdateExpression: "SET guardId = :g, updatedAt = :u",
-              ExpressionAttributeValues: { ":g": canon, ":u": new Date().toISOString() },
-              ConditionExpression: "attribute_exists(pk)",
-            })
-          );
-        }
-      }
+      // Apply update: set assigned/queue and bump rev atomically
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { pk: st.pk, sk: "STATE" },
+          UpdateExpression: "SET #a = :a, #q = :q, #rev = if_not_exists(#rev,:z) + :one, #u = :now",
+          ExpressionAttributeNames: {
+            "#a": "assigned",
+            "#q": "queue",
+            "#rev": "rev",
+            "#u": "updatedAt", // store a flat timestamp map? If you use map, you can skip this.
+          },
+          ExpressionAttributeValues: {
+            ":a": nextAssigned,
+            ":q": nextQueue,
+            ":z": 0,
+            ":one": 1,
+            ":now": { ...(st as any).updatedAt, _devFixIds: new Date().toISOString() },
+          },
+          ConditionExpression: "attribute_exists(pk) AND attribute_exists(sk)",
+        })
+      );
     }
 
     res.json({ examined, changed, applied: apply, samples: changes.slice(0, 20) });
@@ -210,7 +228,7 @@ router.post("/fix-ids", async (req, res) => {
   }
 });
 
-// ---------- PURGE: drop unknowns for a specific date ----------
+// ---------- PURGE: drop unknowns (null seats & remove queue rows) for a date ----------
 router.post("/purge-unknown", async (req, res) => {
   try {
     const date = String(req.query?.date ?? "");
@@ -221,66 +239,69 @@ router.post("/purge-unknown", async (req, res) => {
     const { knownIds, byName } = await loadGuardMaps();
     const toCanon = (v: unknown) => toCanonicalId(v, knownIds, byName);
 
-    let queuesTouched = 0,
-      queueRemoved = 0;
-    let slotsTouched = 0,
-      slotsCleared = 0;
+    const stateRows = await scanStateRows(date);
 
-    // 1) Queue for this date
-    const qItems = await scanAll<QueueItem>({
-      TableName: TABLE,
-      FilterExpression: "pk = :pk AND #sk = :q",
-      ExpressionAttributeValues: { ":pk": `ROTATION#${date}`, ":q": "QUEUE" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
+    let touched = 0;
+    let seatsCleared = 0;
+    let queueRemoved = 0;
 
-    for (const q of qItems) {
-      const cur = Array.isArray(q.queue) ? q.queue : [];
-      const next: QueueEntry[] = [];
-      for (const row of cur) {
+    for (const st of stateRows) {
+      const assigned = { ...(st.assigned || {}) };
+      const queue = Array.isArray(st.queue) ? [...st.queue] : [];
+
+      let dirty = false;
+
+      // Clear unknown seats
+      for (const [seat, gid] of Object.entries(assigned)) {
+        if (gid == null) continue;
+        const canon = toCanon(gid);
+        if (!canon) {
+          assigned[seat] = null;
+          seatsCleared++;
+          dirty = true;
+        }
+      }
+
+      // Drop unknown queue rows
+      const kept: QueueEntry[] = [];
+      for (const row of queue) {
         const canon = toCanon(row.guardId);
-        if (canon) next.push({ ...row, guardId: canon });
-        else queueRemoved++;
+        if (canon) {
+          kept.push({ ...row, guardId: canon });
+        } else {
+          queueRemoved++;
+          dirty = true;
+        }
       }
-      if (next.length !== cur.length) {
-        queuesTouched++;
-        await ddb.send(
-          new PutCommand({
-            TableName: TABLE,
-            Item: { ...q, queue: next, updatedAt: new Date().toISOString() },
-          })
-        );
-      }
+
+      if (!dirty) continue;
+
+      touched++;
+      await ddb.send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { pk: st.pk, sk: "STATE" },
+          UpdateExpression:
+            "SET #a = :a, #q = :q, #rev = if_not_exists(#rev,:z) + :one, #u = :now",
+          ExpressionAttributeNames: {
+            "#a": "assigned",
+            "#q": "queue",
+            "#rev": "rev",
+            "#u": "updatedAt",
+          },
+          ExpressionAttributeValues: {
+            ":a": assigned,
+            ":q": kept,
+            ":z": 0,
+            ":one": 1,
+            ":now": { ...(st as any).updatedAt, _devPurgeUnknown: new Date().toISOString() },
+          },
+          ConditionExpression: "attribute_exists(pk) AND attribute_exists(sk)",
+        })
+      );
     }
 
-    // 2) Seats for this date
-    const frames = await scanAll<SlotItem>({
-      TableName: TABLE,
-      FilterExpression: "pk = :pk AND begins_with(#sk, :slot)",
-      ExpressionAttributeValues: { ":pk": `ROTATION#${date}`, ":slot": "SLOT#" },
-      ExpressionAttributeNames: { "#sk": "sk" },
-      ConsistentRead: true,
-    });
-
-    for (const it of frames) {
-      if (it.guardId == null) continue;
-      const canon = toCanon(it.guardId);
-      if (!canon) {
-        slotsCleared++;
-        slotsTouched++;
-        await ddb.send(
-          new UpdateCommand({
-            TableName: TABLE,
-            Key: { pk: it.pk, sk: it.sk },
-            UpdateExpression: "SET guardId = :g, updatedAt = :u",
-            ExpressionAttributeValues: { ":g": null, ":u": new Date().toISOString() },
-          })
-        );
-      }
-    }
-
-    res.json({ date, queuesTouched, queueRemoved, slotsTouched, slotsCleared });
+    res.json({ date, stateRows: stateRows.length, touched, seatsCleared, queueRemoved });
   } catch (err: any) {
     console.error("[/api/dev/purge-unknown] failed:", err);
     res.status(500).json({ error: "purge-unknown failed", detail: err?.message || String(err) });

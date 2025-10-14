@@ -1,27 +1,38 @@
-//src/routes/plan.ts
+
+// src/routes/plan.ts
 console.log("[routes/plan] LOADED");
 
 import { Router } from "express";
 import {
-  QueryCommand,
-  PutCommand,
-  GetCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { ddb, TABLE } from "../db.js";
 import { computeNext } from "../engine/rotation.js";
 import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
+// 🔑 per-instance state helpers
+import { getState, putState, type RotationState } from "../rotation/store";
+import { rotationKey } from "../rotation/rotationKey";
+
+// env
+const SANDBOX_TTL_SECS = Number(process.env.SANDBOX_TTL_DAYS || 7) * 24 * 3600;
+
 const router = Router();
 router.get("/_ping", (_req, res) => res.json({ ok: true, router: "plan" }));
+
+// Build key (used only for reference/logs)
+const keyFor = (req: any, date: string) => rotationKey(date, req.sandboxInstanceId);
 
 // ---------- Canonicalization helpers ----------
 const stripGuardPrefix = (v: any): string =>
   typeof v === "string" && v.startsWith("GUARD#") ? v.slice(6) : String(v || "");
 
-const norm  = (s: string) => s.normalize?.("NFKC").toLowerCase().trim();
+const norm = (s: string) => s.normalize?.("NFKC").toLowerCase().trim();
+const strip = (s?: any) => String(s ?? "").trim().replace(/^GUARD#/, "");
+const isUuid = (s: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
-
+// Guards/known-ids map
 async function loadGuardMaps() {
   const scan = await ddb.send(
     new ScanCommand({
@@ -39,7 +50,7 @@ async function loadGuardMaps() {
         ? it.pk.slice(6)
         : String(it.id ?? ""),
     name: String(it.name ?? ""),
-    dob: String(it.dob ?? ""), // always string for engine typing
+    dob: String(it.dob ?? ""), // keep string for engine typing
   }));
 
   const knownIds = new Set(guards.map((g) => g.id));
@@ -56,21 +67,19 @@ function toId(raw: any, knownIds: Set<string>, byName: Map<string, string>): str
   const m = byName.get(norm(s));
   return m && knownIds.has(m) ? m : null;
 }
-const strip = (s?: any) => String(s ?? "").trim().replace(/^GUARD#/, "");
-const isUuid = (s: string) =>
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
 
-// ✅ Loose resolver: allow brand-new UUIDs that aren't in knownIds yet
+// ✅ Loose resolver: allow new UUIDs as IDs and name->ID mapping
 function toIdLoose(raw: any, knownIds: Set<string>, byName: Map<string, string>): string | null {
   const s = strip(raw);
   if (!s) return null;
-  if (knownIds.has(s)) return s;       // already-known
-  if (isUuid(s)) return s;             // brand-new but valid UUID → accept
+  if (knownIds.has(s)) return s; // known
+  if (isUuid(s)) return s; // brand-new UUID
   const mapped = byName.get(norm(s) || "");
   if (!mapped) return null;
   if (knownIds.has(mapped) || isUuid(mapped)) return mapped;
   return null;
 }
+
 // ---------- Sections & ticks ----------
 const SECTIONS = Array.from(new Set(POSITIONS.map((p) => p.id.split(".")[0]))).sort(
   (a, b) => Number(a) - Number(b)
@@ -80,260 +89,134 @@ function tickIndexFromISO(nowISO: string): number {
   return Math.floor(Date.parse(nowISO) / (15 * 60 * 1000));
 }
 
-// DB/engine queue row type used in this routes file
+// DB/engine queue row type used here
 type QueueRow = { guardId: string; returnTo: string; enteredTick: number };
 
-// ---------- Common loaders ----------
-async function loadAssignedLatestFrame(
-  date: string,
-  knownIds?: Set<string>,
-  byName?: Map<string, string>
-) {
-  const q = await ddb.send(
-    new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: "pk = :pk",
-      ExpressionAttributeValues: { ":pk": `ROTATION#${date}` },
-      ConsistentRead: true,
-    })
-  );
-
-  const slots = (q.Items ?? []).filter((it: any) => it.type === "RotationSlot");
-  let latestTickISO: string | null = null;
-  for (const it of slots) {
-    const u = String(it.updatedAt ?? "");
-    if (!u) continue;
-    if (!latestTickISO || u > latestTickISO) latestTickISO = u;
-  }
-
+/** Helpers that now read/write the single per-instance STATE row **/
+async function readAssigned(req: any, date: string): Promise<Record<string, string | null>> {
+  const state = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
   const assigned: Record<string, string | null> = Object.fromEntries(
     POSITIONS.map((p) => [p.id, null as string | null])
   );
-
-  if (latestTickISO) {
-    for (const it of slots) {
-      if (String(it.updatedAt ?? "") !== latestTickISO) continue;
-      const sid = String(it.stationId ?? "");
-      if (!sid) continue;
-      const canon = toId(it.guardId, knownIds ?? new Set(), byName ?? new Map());
-      assigned[sid] = canon; // may be null
-    }
-  }
+  Object.assign(assigned, state.assigned || {});
   return assigned;
 }
-
-
-async function loadQueue(
-  date: string,
-  knownIds: Set<string>,
-  byName: Map<string, string>,
-  currentTick?: number
-) {
-  const item = await ddb.send(
-    new GetCommand({
-      TableName: TABLE,
-      Key: { pk: `ROTATION#${date}`, sk: "QUEUE" },
-      ConsistentRead: true, // ensures we see the latest
-    })
-  );
-
-  const raw = item.Item?.queue ?? [];
-  const out: { guardId: string; returnTo: string; enteredTick: number }[] = [];
-
-  for (const q of Array.isArray(raw) ? raw : []) {
-    const gid = toIdLoose(q.guardId, knownIds, byName); // ✅ use loose
-    const returnTo = String(q?.returnTo ?? "");
-    const enteredTick =
-      typeof q?.enteredTick === "number" && Number.isFinite(q.enteredTick)
-        ? Math.trunc(q.enteredTick)
-        : currentTick ?? 0;
-    if (gid && returnTo) {
-      out.push({ guardId: gid, returnTo, enteredTick });
-    }
-  }
-
-  return out;
+async function readQueue(req: any, date: string): Promise<QueueRow[]> {
+  const state = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  return Array.isArray(state.queue) ? state.queue.map(q => ({
+    guardId: String(q.guardId),
+    returnTo: String(q.returnTo),
+    enteredTick: Number.isFinite(q.enteredTick) ? Math.trunc(q.enteredTick) : 0,
+  })) : [];
 }
 
 // ============================================================================
-// POST /api/plan/rotate
+// POST /api/plan/rotate  (per-instance)
 // ============================================================================
-router.post("/rotate", async (req, res) => {
-  const date = req.body?.date;
+router.post("/rotate", async (req: any, res) => {
+  const date = req.body?.date as string;
   if (!date) return res.status(400).json({ error: "date required" });
 
   const { guards, knownIds, byName } = await loadGuardMaps();
 
-  // ----------- Normalize incoming snapshots -----------
-  const dbAssigned = await loadAssignedLatestFrame(date, knownIds, byName);
+  // normalize incoming client snapshot vs server snapshot
+  const dbAssigned = await readAssigned(req, date);
 
   const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<
     string,
     string | null | undefined
   >;
-
   const clientAssigned: Record<string, string | null> = {};
   for (const p of POSITIONS) {
-    clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName); // ✅ use loose
+    clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName);
   }
 
   const countNonNull = (m: Record<string, string | null>) =>
     Object.values(m).reduce((n, v) => n + (v ? 1 : 0), 0);
 
   const assigned =
-    countNonNull(dbAssigned) >= countNonNull(clientAssigned)
-      ? dbAssigned
-      : clientAssigned;
+    countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
 
-  // Breaks
-  const breaksItem = await ddb.send(
-    new GetCommand({
-      TableName: TABLE,
-      Key: { pk: `ROTATION#${date}`, sk: "BREAKS" },
-      ConsistentRead: true,
-    })
-  );
-  const breaks = (breaksItem.Item?.breaks ?? {}) as Record<string, string>;
-
-  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const nowISO =
+    typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const currentTick = tickIndexFromISO(nowISO);
 
-  // ----------- Pull canonical queue -----------
-  const queue = await loadQueue(date, knownIds, byName, currentTick); // ✅ already loose-safe
+  const queue = await readQueue(req, date);
 
-  // ----------- Compute next state -----------
-  const out = computeNext({ assigned, guards, breaks, queue, nowISO });
+  // Compute next using your engine
+  const out = computeNext({ assigned, guards, breaks: {}, queue, nowISO });
 
-  // Debug logs (optional)
-  if (process.env.NODE_ENV !== "production") {
-    const assignedIn = Object.values(assigned).filter(Boolean).length;
-    const assignedOut = Object.values(out.nextAssigned).filter(Boolean).length;
-    console.log("[rotate.debug]", {
-      period: out.meta.period,
-      assignedIn,
-      assignedOut,
-      queueLen: out.meta.breakQueue.length,
-    });
-  }
+  // Build next per-instance state
+  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const next: RotationState = {
+    ...current,
+    assigned: out.nextAssigned,
+    queue: (out.meta?.breakQueue ?? []).map((e: any) => ({
+      guardId: String(e.guardId),
+      returnTo: String(e.returnTo),
+      enteredTick:
+        typeof e?.enteredTick === "number" && Number.isFinite(e.enteredTick)
+          ? Math.trunc(e.enteredTick)
+          : currentTick,
+    })),
+    breaks: out.nextBreaks || {},
+    conflicts: Array.isArray(out.conflicts) ? out.conflicts : [],
+    tick: (current.tick ?? 0) + 1,
+    updatedAt: {
+      ...(current.updatedAt || {}),
+      // optionally stamp each seat touched; here we just stamp the write time per seat
+      ...Object.fromEntries(Object.keys(out.nextAssigned).map((sid) => [sid, nowISO])),
+    },
+    rev: (current.rev ?? 0) + 1,
+  };
 
-  // ----------- Monotonic timestamp handling -----------
-  const serverNow = new Date();
-  let writeUpdatedAt = serverNow.toISOString();
-
-  const q = await ddb.send(
-    new QueryCommand({
-      TableName: TABLE,
-      KeyConditionExpression: "pk = :pk",
-      ExpressionAttributeValues: { ":pk": `ROTATION#${date}` },
-      ProjectionExpression: "updatedAt, #t",
-      ExpressionAttributeNames: { "#t": "type" },
-      ConsistentRead: true,
-    })
-  );
-
-  const frames = (q.Items ?? []).filter((it: any) => it.type === "RotationSlot");
-  let latestTickISO: string | null = null;
-  for (const it of frames) {
-    const u = String(it.updatedAt ?? "");
-    if (u && (!latestTickISO || u > latestTickISO)) latestTickISO = u;
-  }
-  if (latestTickISO && writeUpdatedAt <= latestTickISO) {
-    writeUpdatedAt = new Date(new Date(latestTickISO).getTime() + 1).toISOString();
-  }
-  const time = writeUpdatedAt.slice(11, 19);
-
-  // ----------- Persist seats -----------
-  for (const [stationId, guardId] of Object.entries(out.nextAssigned)) {
-    await ddb.send(
-      new PutCommand({
-        TableName: TABLE,
-        Item: {
-          pk: `ROTATION#${date}`,
-          sk: `SLOT#${time}#${stationId}`,
-          type: "RotationSlot",
-          stationId,
-          guardId: guardId ?? null,
-          time,
-          date,
-          notes: "rotate-ring+queue",
-          updatedAt: writeUpdatedAt,
-        },
-      })
-    );
-  }
-
-  // ----------- Persist queue -----------
-  const queueToPersist = (out.meta.breakQueue ?? []).map((e: any) => ({
-    guardId: String(e.guardId),
-    returnTo: String(e.returnTo),
-    enteredTick:
-      typeof e?.enteredTick === "number" && Number.isFinite(e.enteredTick)
-        ? Math.trunc(e.enteredTick)
-        : currentTick,
-  }));
-
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "QUEUE",
-        type: "Queue",
-        queue: queueToPersist,
-        updatedAt: writeUpdatedAt,
-      },
-    })
-  );
+  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+    ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
+  });
 
   res.json({
-    assigned: out.nextAssigned,
-    breaks: out.nextBreaks,
-    conflicts: out.conflicts,
-    meta: {
-      period: out.meta.period,
-      breakQueue: out.meta.breakQueue,
-      queuesBySection: out.meta.queuesBySection,
-    },
+    assigned: saved.assigned,
+    breaks: saved.breaks,
+    conflicts: saved.conflicts,
+    meta: { period: out.meta?.period ?? "UNKNOWN", breakQueue: saved.queue },
     nowISO,
   });
 });
 
 // ============================================================================
-// GET /api/plan/queue
+// GET /api/plan/queue  (per-instance)
 // ============================================================================
-router.get("/queue", async (req, res) => {
+router.get("/queue", async (req: any, res) => {
   const date = String(req.query?.date || "");
   if (!date) return res.status(400).json({ error: "date required" });
-
-  const { knownIds, byName } = await loadGuardMaps();
-  const currentTick = tickIndexFromISO(new Date().toISOString());
-  const queue = await loadQueue(date, knownIds, byName, currentTick);
-  res.json({ queue });
+  const q = await readQueue(req, date);
+  res.json({ queue: q });
 });
 
 // ============================================================================
-// POST /api/plan/queue-add
+// POST /api/plan/queue-add  (per-instance)
 // ============================================================================
-router.post("/queue-add", async (req, res) => {
+router.post("/queue-add", async (req: any, res) => {
   const date = req.body?.date as string;
   const returnTo = String(req.body?.returnTo ?? "");
-  const { knownIds, byName } = await loadGuardMaps();
-
-  const guardId = toId(req.body?.guardId, knownIds, byName);
-  if (!date || !guardId || !returnTo) {
-    return res.status(400).json({ error: "date, guardId, returnTo required" });
+  if (!date || !returnTo) {
+    return res.status(400).json({ error: "date, returnTo required" });
   }
   if (!SECTIONS.includes(returnTo)) {
-    return res
-      .status(400)
-      .json({ error: `returnTo must be one of ${SECTIONS.join(",")}` });
+    return res.status(400).json({ error: `returnTo must be one of ${SECTIONS.join(",")}` });
+  }
+
+  const { knownIds, byName } = await loadGuardMaps();
+  const guardId = toId(req.body?.guardId, knownIds, byName);
+  if (!guardId) {
+    return res.status(400).json({ error: "guardId invalid" });
   }
 
   // reject if seated
-  const assigned = await loadAssignedLatestFrame(date, knownIds, byName);
+  const assigned = await readAssigned(req, date);
   const seated = new Set(Object.values(assigned).filter((v): v is string => Boolean(v)));
   if (seated.has(guardId)) {
-    const qNow = await loadQueue(date, knownIds, byName);
+    const qNow = await readQueue(req, date);
     return res.status(409).json({ error: "Guard is already assigned to a seat", queue: qNow });
   }
 
@@ -341,54 +224,47 @@ router.post("/queue-add", async (req, res) => {
     typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const currentTick = tickIndexFromISO(nowISO);
 
-  const qNow = await loadQueue(date, knownIds, byName, currentTick);
-  if (qNow.some((e) => e.guardId === guardId)) {
-    return res.json({ ok: true, queue: qNow });
+  // load & append if not exists
+  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const existing = Array.isArray(current.queue) ? current.queue : [];
+  if (existing.some((e) => e.guardId === guardId)) {
+    return res.json({ ok: true, queue: existing });
   }
 
-  const nextQueue: QueueRow[] = [...qNow, { guardId, returnTo, enteredTick: currentTick }];
+  const next: RotationState = {
+    ...current,
+    queue: [...existing, { guardId, returnTo, enteredTick: currentTick }],
+    rev: (current.rev ?? 0) + 1,
+  };
 
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "QUEUE",
-        type: "Queue",
-        queue: nextQueue,
-        updatedAt: nowISO,
-      },
-    })
-  );
+  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+    ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
+  });
 
-  res.json({ ok: true, queue: nextQueue });
+  res.json({ ok: true, queue: saved.queue || [] });
 });
 
 // ============================================================================
-// POST /api/plan/queue-clear
+// POST /api/plan/queue-clear  (per-instance)
 // ============================================================================
-router.post("/queue-clear", async (req, res) => {
-  const date = req.body?.date;
+router.post("/queue-clear", async (req: any, res) => {
+  const date = req.body?.date as string;
   if (!date) return res.status(400).json({ error: "date required" });
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "QUEUE",
-        type: "Queue",
-        queue: [],
-        updatedAt: new Date().toISOString(),
-      },
-    })
-  );
-  res.json({ ok: true, queue: [] });
+
+  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const next: RotationState = { ...current, queue: [], rev: (current.rev ?? 0) + 1 };
+
+  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+    ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
+  });
+
+  res.json({ ok: true, queue: saved.queue || [] });
 });
 
 // ============================================================================
-// POST /api/plan/queue-set  (atomic replace)
+// POST /api/plan/queue-set (atomic replace, per-instance)
 // ============================================================================
-router.post("/queue-set", async (req, res) => {
+router.post("/queue-set", async (req: any, res) => {
   const date = String(req.body?.date || "");
   if (!date) return res.status(400).json({ error: "date required" });
 
@@ -410,13 +286,14 @@ router.post("/queue-set", async (req, res) => {
   }
 
   const { knownIds, byName } = await loadGuardMaps();
-  const assignedLatest = await loadAssignedLatestFrame(date, knownIds, byName);
+  const assignedLatest = await readAssigned(req, date);
   const seated = new Set(Object.values(assignedLatest).filter((v): v is string => Boolean(v)));
 
-  const existing = await loadQueue(date, knownIds, byName, currentTick);
+  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const existing = Array.isArray(current.queue) ? current.queue : [];
   const existingByGuard = new Map(existing.map((q) => [q.guardId, q.enteredTick]));
 
-  // Keep last occurrence per guard in the provided payload
+  // Keep last occurrence per guard in payload
   const lastIndex = new Map<string, number>();
   rows.forEach((r, i) => {
     const gid = toId(r?.guardId, knownIds, byName) || "";
@@ -435,38 +312,35 @@ router.post("/queue-set", async (req, res) => {
     const gid = toId(r?.guardId, knownIds, byName);
     const sec = String(r?.returnTo || "");
 
-    if (!gid || !knownIds.has(gid)) continue;
+    if (!gid || (!knownIds.has(gid) && !isUuid(gid))) continue;
     if (!SECTIONS.includes(sec)) continue;
     if (seated.has(gid)) continue;
-    if (lastIndex.get(gid) !== i) continue; // not the last instance
+    if (lastIndex.get(gid) !== i) continue; // keep only last instance
 
     const preservedTick = existingByGuard.get(gid);
     const enteredTick = preservedTick ?? coerceTick(r?.enteredTick);
     nextQueue.push({ guardId: gid, returnTo: sec, enteredTick });
   }
 
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "QUEUE",
-        type: "Queue",
-        queue: nextQueue,
-        updatedAt: nowISO,
-      },
-    })
-  );
+  const next: RotationState = {
+    ...current,
+    queue: nextQueue,
+    rev: (current.rev ?? 0) + 1,
+  };
 
-  res.json({ ok: true, queue: nextQueue });
+  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+    ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
+  });
+
+  res.json({ ok: true, queue: saved.queue || [] });
 });
 
 // ============================================================================
-// POST /api/plan/autopopulate
-//  (fills seats; append leftover to queues, IDs only; logs with names for dev)
+// POST /api/plan/autopopulate  (per-instance)
+//  fills seats; appends leftovers to queues; prefers adults/minors by seat
 // ============================================================================
-router.post("/autopopulate", async (req, res) => {
-  const date = req.body?.date;
+router.post("/autopopulate", async (req: any, res) => {
+  const date = req.body?.date as string;
   if (!date) return res.status(400).json({ error: "date required" });
 
   const { guards, knownIds, byName } = await loadGuardMaps();
@@ -474,30 +348,31 @@ router.post("/autopopulate", async (req, res) => {
   const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const time = nowISO.slice(11, 19);
   const currentTick = tickIndexFromISO(nowISO);
-  const log = (...xs: any[]) => console.log("[auto]", ...xs);
 
-  const nameById = new Map(guards.map((g) => [g.id, g.name || g.id]));
-  const nm = (id?: string | null) => (id ? nameById.get(id) || id : "(none)");
+  // Allowed (on-duty set or everyone if missing)
+  const rawAllowed = Array.isArray(req.body?.allowedIds)
+    ? (req.body.allowedIds as any[])
+    : guards.map((g) => g.id);
+  const allowedIds: string[] = rawAllowed
+    .map((v) => toIdLoose(v, knownIds, byName))
+    .filter(Boolean) as string[];
 
-  // Allowed (on-duty or everyone if not supplied)
-const rawAllowed = Array.isArray(req.body?.allowedIds) ? (req.body.allowedIds as any[]) : guards.map(g => g.id);
-const allowedIds: string[] = rawAllowed
-  .map(v => toIdLoose(v, knownIds, byName))    // ✅ use loose
-  .filter(Boolean) as string[];
+  // Seats: client snapshot wins if provided; fallback to server
+  const serverAssigned = await readAssigned(req, date);
+  const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<
+    string,
+    string | null | undefined
+  >;
+  const seatsSnapshot: Record<string, string | null> = {};
+  for (const p of POSITIONS) {
+    const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);
+    seatsSnapshot[p.id] = clientVal != null ? clientVal : serverAssigned[p.id] ?? null;
+  }
 
-  // Seats (client snapshot wins for any provided slot)
-  const dbAssigned = await loadAssignedLatestFrame(date, knownIds, byName);
-const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null | undefined>;
-const seatsSnapshot: Record<string, string | null> = {};
-for (const p of POSITIONS) {
-  const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);   // ✅ loose
-  seatsSnapshot[p.id] = clientVal != null ? clientVal : dbAssigned[p.id] ?? null;
-}
+  // Existing queue
+  const existingQueue = await readQueue(req, date);
 
-  // Existing queue (canonicalize to IDs)
-  const existingQueue = await loadQueue(date, knownIds, byName, currentTick);
-
-  // Section seats (ordered)
+  // Section seat ordering
   const sectionIds = SECTIONS;
   const seatsBySection: Record<string, string[]> = {};
   for (const s of sectionIds) seatsBySection[s] = [];
@@ -519,6 +394,9 @@ for (const p of POSITIONS) {
     if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
     return age;
   };
+
+  const nameById = new Map(guards.map((g) => [g.id, g.name || g.id]));
+  const nm = (id?: string | null) => (id ? nameById.get(id) || id : "(none)");
 
   const seatedSet = new Set(Object.values(seatsSnapshot).filter((v): v is string => Boolean(v)));
   const queuedSet = new Set(existingQueue.map((q) => q.guardId));
@@ -562,9 +440,9 @@ for (const p of POSITIONS) {
       if (pick.id) {
         seatsSnapshot[seatId] = pick.id;
         seatedSet.add(pick.id);
-        log(`${label} ${seatId} ← ${nm(pick.id)} [${pick.tag}]`);
+        console.log(`[auto] ${label} ${seatId} ← ${nm(pick.id)} [${pick.tag}]`);
       } else {
-        log(`${label} ${seatId} ← (none)`);
+        console.log(`[auto] ${label} ${seatId} ← (none)`);
       }
     };
 
@@ -586,7 +464,7 @@ for (const p of POSITIONS) {
         if (pick.id) {
           seatsSnapshot[seatId] = pick.id;
           seatedSet.add(pick.id);
-          log(`backfill ${seatId} ← ${nm(pick.id)} [${pick.tag}]`);
+          console.log(`[auto] backfill ${seatId} ← ${nm(pick.id)} [${pick.tag}]`);
         }
       }
     }
@@ -623,61 +501,35 @@ for (const p of POSITIONS) {
 
   const nextQueue = existingQueue.concat(appended);
 
-  // Persist breaks (empty), seats, queue
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "BREAKS",
-        type: "Breaks",
-        breaks: {},
-        updatedAt: nowISO,
-      },
-    })
-  );
+  // Persist single STATE row
+  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const next: RotationState = {
+    ...current,
+    assigned: seatsSnapshot,
+    queue: nextQueue,
+    breaks: {}, // you can wire real breaks here later
+    conflicts: [],
+    tick: (current.tick ?? 0) + 1,
+    updatedAt: {
+      ...(current.updatedAt || {}),
+      ...Object.fromEntries(Object.keys(seatsSnapshot).map((sid) => [sid, nowISO])),
+    },
+    rev: (current.rev ?? 0) + 1,
+  };
 
-  for (const [seatId, gid] of Object.entries(seatsSnapshot)) {
-    await ddb.send(
-      new PutCommand({
-        TableName: TABLE,
-        Item: {
-          pk: `ROTATION#${date}`,
-          sk: `SLOT#${time}#${seatId}`,
-          type: "RotationSlot",
-          stationId: seatId,
-          guardId: gid ?? null,
-          time,
-          date,
-          notes: "autopopulate-rest-prefill",
-          updatedAt: nowISO,
-        },
-      })
-    );
-  }
-
-  await ddb.send(
-    new PutCommand({
-      TableName: TABLE,
-      Item: {
-        pk: `ROTATION#${date}`,
-        sk: "QUEUE",
-        type: "Queue",
-        queue: nextQueue,
-        updatedAt: nowISO,
-      },
-    })
-  );
+  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+    ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
+  });
 
   const queuesBySection = Object.fromEntries(
-    sectionIds.map((s) => [s, nextQueue.filter((q) => q.returnTo === s)])
+    sectionIds.map((s) => [s, (saved.queue || []).filter((q) => q.returnTo === s)])
   );
 
   res.json({
-    assigned: seatsSnapshot,
-    breaks: {},
-    conflicts: [],
-    meta: { period: "ALL_AGES", breakQueue: nextQueue, queuesBySection },
+    assigned: saved.assigned,
+    breaks: saved.breaks || {},
+    conflicts: saved.conflicts || [],
+    meta: { period: "ALL_AGES", breakQueue: saved.queue || [], queuesBySection },
     nowISO,
   });
 });

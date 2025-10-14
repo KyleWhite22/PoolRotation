@@ -12,6 +12,9 @@ import {
 import crypto from "node:crypto";
 import { ddb, TABLE } from "../db.js";
 import { GuardCreate, GuardUpdate } from "../schema.js";
+// in each route file
+import { rotationKey } from "../rotation/rotationKey";
+const keyFor = (req: any, date: string) => rotationKey(date, req.sandboxInstanceId);
 
 const router = Router();
 
@@ -263,22 +266,72 @@ router.put("/:id", async (req: Request, res: Response) => {
 
 /* ----------------------- DELETE ----------------------- */
 router.delete("/:id", async (req: Request, res: Response) => {
+  const id = req.params.id.trim();
+
+  // 1) Delete the guard metadata row
   try {
     await ddb.send(
       new DeleteCommand({
         TableName: TABLE,
-        Key: { pk: `GUARD#${req.params.id.trim()}`, sk: "METADATA" },
+        Key: { pk: `GUARD#${id}`, sk: "METADATA" },
         ConditionExpression: "attribute_exists(pk)",
       })
     );
-    res.json({ ok: true });
   } catch (err: any) {
     if (err?.name === "ConditionalCheckFailedException") {
       return res.status(404).json({ error: "Guard not found" });
     }
     console.error("DELETE /api/guards/:id error:", err);
-    res.status(500).json({ error: "Failed to delete guard" });
+    return res.status(500).json({ error: "Failed to delete guard" });
   }
+
+  // 2) Best-effort scrub from all rotation STATE rows (all dates & instances)
+  try {
+    // scan all STATE rows: pk begins_with ROTATION#, sk = STATE
+    const stateRows: Array<{ pk: string; sk: string; assigned?: Record<string,string|null>; queue?: Array<{guardId:string;returnTo?:string;enteredTick?:number}> }> = [];
+    let esk: Record<string, any> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: TABLE,
+        FilterExpression: "begins_with(pk, :p) AND #sk = :sk",
+        ExpressionAttributeValues: { ":p": "ROTATION#", ":sk": "STATE" },
+        ExpressionAttributeNames: { "#sk": "sk" },
+        ExclusiveStartKey: esk,
+        ConsistentRead: true,
+      }));
+      stateRows.push(...(page.Items as any[] ?? []));
+      esk = page.LastEvaluatedKey;
+    } while (esk);
+
+    for (const st of stateRows) {
+      const assigned = { ...(st.assigned || {}) };
+      const queue = Array.isArray(st.queue) ? [...st.queue] : [];
+      let dirty = false;
+
+      // clear seats
+      for (const [seat, gid] of Object.entries(assigned)) {
+        if (gid === id) { assigned[seat] = null; dirty = true; }
+      }
+      // remove queue entries
+      const kept = queue.filter(q => q.guardId !== id);
+      if (kept.length !== queue.length) dirty = true;
+
+      if (dirty) {
+        await ddb.send(new UpdateCommand({
+          TableName: TABLE,
+          Key: { pk: st.pk, sk: "STATE" },
+          UpdateExpression: "SET #a = :a, #q = :q, #rev = if_not_exists(#rev,:z)+:one",
+          ExpressionAttributeNames: { "#a": "assigned", "#q": "queue", "#rev": "rev" },
+          ExpressionAttributeValues: { ":a": assigned, ":q": kept, ":z": 0, ":one": 1 },
+          ConditionExpression: "attribute_exists(pk) AND attribute_exists(sk)",
+        }));
+      }
+    }
+  } catch (e) {
+    console.warn("[guards.delete] scrub from STATE failed (continuing):", e);
+  }
+
+  res.json({ ok: true });
 });
 
 export default router;

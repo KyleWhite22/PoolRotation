@@ -8,6 +8,7 @@ import GuardsListModal from "../components/modals/GuardsListModal";
 import { POSITIONS } from "../data/poolLayout.js";
 import type { Guard } from "../lib/types";
 import { StandardLoading, RotationLoading, AutofillLoading } from "../components/LoadingScreens";
+import { apiFetch } from "../lib/api";
 
 const API_BASE =
   location.hostname.includes("localhost")
@@ -307,7 +308,7 @@ export default function Home() {
   }, [fetchGuards]);
 
   const fetchAssignments = async () => {
-    const res = await fetch(`${API_BASE}/api/rotations/day/${dayKey}`, {
+    const res = await apiFetch(`/api/rotations/day/${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const items: { stationId: string; guardId?: string | null; updatedAt?: string }[] = await res.json();
@@ -358,15 +359,15 @@ export default function Home() {
       returnTo: q.returnTo,
       enteredTick: q.enteredTick,
     }));
-    await fetch(`${API_BASE}/api/queue-set`, {
+    await apiFetch(`/api/queue-set`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      headers: { "x-api-key": "dev-key-123" },
       body: JSON.stringify({ date: dayKey, queue: payload }),
     });
   };
 
   const fetchQueue = async () => {
-    const res = await fetch(`${API_BASE}/api/queue?date=${dayKey}`, {
+    const res = await apiFetch(`/api/queue?date=${dayKey}`, {
       headers: { "x-api-key": "dev-key-123" },
     });
     const data = await res.json();
@@ -437,9 +438,9 @@ export default function Home() {
   };
 
   const persistSeat = async (seatId: string, guardId: string | null, notes: string) => {
-    await fetch(`${API_BASE}/api/rotations/slot`, {
+    await apiFetch(`/api/rotations/slot`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+      headers: { "x-api-key": "dev-key-123" },
       body: JSON.stringify({
         date: dayKey,
         nowISO: simulatedNow.toISOString(),
@@ -449,8 +450,6 @@ export default function Home() {
       }),
     });
   };
-
- 
 
   // -------- Mutations --------
   const assignGuard = async (positionId: string, guardId: string) => {
@@ -469,12 +468,12 @@ export default function Home() {
   const clearGuard = async (positionId: string) => {
     setAssigned((prev) => ({ ...prev, [positionId]: null } as Assigned));
     try {
-      await fetch(`${API_BASE}/api/rotations/slot`, {
+      await apiFetch(`/api/rotations/slot`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
         body: JSON.stringify({
           date: dayKey,
-          time: new Date().toISOString().slice(11, 16),
+          nowISO: simulatedNow.toISOString(),
           stationId: positionId,
           guardId: null,
           notes: "clear-seat",
@@ -489,9 +488,9 @@ export default function Home() {
     const gid = toId(guardId);
     if (!gid) return;
     try {
-      await fetch(`${API_BASE}/api/queue-add`, {
+      await apiFetch(`/api/queue-add`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
           guardId: gid,
@@ -591,17 +590,13 @@ export default function Home() {
       if (seatId) {
         setAssigned((prev) => ({ ...prev, [seatId]: null } as Assigned));
         try {
-          await fetch(`${API_BASE}/api/rotations/slot?v=${Date.now()}`, {
+          await apiFetch(`/api/rotations/slot?v=${Date.now()}`, {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-api-key": "dev-key-123",
-              "Cache-Control": "no-store",
-            },
+            headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
             cache: "no-store" as RequestCache,
             body: JSON.stringify({
               date: dayKey,
-              time: new Date().toISOString().slice(11, 16),
+              nowISO: simulatedNow.toISOString(),
               stationId: seatId,
               guardId: null,
               notes: "queue-drop-from-seat",
@@ -705,9 +700,9 @@ export default function Home() {
       const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
       setSimulatedNow(newNow);
 
-      const res = await fetch(`${API_BASE}/api/rotate`, {
+      const res = await apiFetch(`/api/rotate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
           nowISO: newNow.toISOString(),
@@ -764,9 +759,9 @@ export default function Home() {
   // Clears queues both server- and client-side
   const handleClearQueues = async () => {
     try {
-      await fetch(`${API_BASE}/api/queue-clear`, {
+      await apiFetch(`/api/queue-clear`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({ date: dayKey }),
       });
     } catch (e) {
@@ -812,13 +807,9 @@ export default function Home() {
       const time = new Date().toISOString().slice(11, 16);
       await Promise.allSettled([
         ...POSITIONS.map((p) =>
-          fetch(`${API_BASE}/api/rotations/slot?v=` + Date.now(), {
+          apiFetch(`/api/rotations/slot?v=` + Date.now(), {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-api-key": "dev-key-123",
-              "Cache-Control": "no-store",
-            },
+            headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
             body: JSON.stringify({
               date: day,
               time,
@@ -829,13 +820,9 @@ export default function Home() {
             cache: "no-store" as RequestCache,
           })
         ),
-        fetch(`${API_BASE}/api/queue-clear?v=` + Date.now(), {
+        apiFetch(`/api/queue-clear?v=` + Date.now(), {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": "dev-key-123",
-            "Cache-Control": "no-store",
-          },
+          headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
           body: JSON.stringify({ date: day }),
           cache: "no-store" as RequestCache,
         }),
@@ -860,9 +847,9 @@ export default function Home() {
         (id) => knownIds.has(id) || isUuid(String(id))
       );
 
-      const res = await fetch(`${API_BASE}/api/autopopulate`, {
+      const res = await apiFetch(`/api/autopopulate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": "dev-key-123" },
+        headers: { "x-api-key": "dev-key-123" },
         body: JSON.stringify({
           date: dayKey,
           nowISO: simulatedNow.toISOString(),

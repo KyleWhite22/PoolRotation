@@ -1,4 +1,5 @@
 // src/lib/api.ts
+import { getInstanceId } from "./sandbox";
 export type Guard = { id: string; name: string; dob: string | null; phone: string | null };
 
 const API_BASE =
@@ -49,3 +50,10 @@ export const api = {
   rotate:   (body: any)   => post("/api/rotate", body),
   auto:     (body: any)   => post("/api/autopopulate", body),
 };
+
+export async function apiFetch(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  headers.set("Content-Type", "application/json");
+  headers.set("X-Rotation-Instance", getInstanceId()); // ← always sandbox
+  return fetch(`${API_BASE}${path}`, { ...init, headers });
+}

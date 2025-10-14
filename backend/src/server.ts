@@ -2,6 +2,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import { sandboxResolver } from "./middleware/sandbox";
 
 export function createApp() {
   const app = express();
@@ -17,6 +18,7 @@ export function createApp() {
     })
   );
   app.use(express.json({ limit: "1mb" }));
+app.use(sandboxResolver);
 
   // Simple probes
   app.get("/", (_req, res) =>
