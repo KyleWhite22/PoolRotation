@@ -794,80 +794,75 @@ const handleReset = async () => {
 
 
   const autopopulate = async () => {
-    setIsAutofilling(true);
-    try {
-      if (guardsDirtyRef.current) await fetchGuards({ silent: true });
+  setIsAutofilling(true);
+  try {
+    if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
-      if (allowedIds.length === 0) {
-        alert("Select at least one on-duty guard before Autopopulate.");
-        return;
-      }
-
-      const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId))).filter(
-        (id) => knownIds.has(id) || isUuid(String(id))
-      );
-
-      const res = await apiFetch(`/api/plan/autopopulate?v=${Date.now()}`, {
-  method: "POST",
-  headers: { "x-api-key": "dev-key-123" },
-  body: JSON.stringify({
-    date: dayKey,
-    nowISO: simulatedNow.toISOString(),
-    allowedIds,
-    assignedSnapshot: {},    // <-- empty so server doesn’t keep old seats
-    lockedQueueIds,
-    force: true              // <-- optional; see server tweak below
-  }),
-});
-      const data = await res.json();
-console.log("[autopopulate] debug:", data?.meta?.debug);
-
-      if (data?.assigned) {
-        const updates: Partial<Assigned> = {};
-        const inp = data.assigned;
-
-        if (Array.isArray(inp)) {
-          for (const it of inp) {
-            const seat = String(it?.seat ?? "");
-            if (!seat) continue;
-            updates[seat] = toId(it?.guard);
-          }
-        } else if (inp && typeof inp === "object") {
-          for (const [seat, raw] of Object.entries(inp)) {
-            updates[seat] = toId(raw);
-          }
-        }
-if (data?.assigned && typeof data.assigned === "object") {
-  const next: Assigned = emptyAssigned();
-  for (const [seat, raw] of Object.entries(data.assigned)) {
-    next[seat] = toId(raw);
-  }
-  setAssigned(next); // <-- full replace
-}      }
-
-      if (data?.breaks) setBreaks(data.breaks);
-      if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
-
-      if (Array.isArray(data?.meta?.breakQueue)) {
-        const normalized: QueueEntry[] = asQueueEntriesRaw(data.meta.breakQueue)
-          .map((q) => {
-            const canon = toId(q.guardId);
-            return canon
-              ? { guardId: canon, returnTo: String(q.returnTo), enteredTick: q.enteredTick || 0 }
-              : null;
-          })
-          .filter(Boolean) as QueueEntry[];
-        setBreakQueue(deduplicateQueue(normalized));
-      } else {
-        await fetchQueue();
-      }
-    } catch (e) {
-      console.error("Autopopulate failed:", e);
-    } finally {
-      setIsAutofilling(false);
+    const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+    if (allowedIds.length === 0) {
+      alert("Select at least one on-duty guard before Autopopulate.");
+      return;
     }
-  };
+
+    const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId)))
+      .filter((id) => knownIds.has(id) || isUuid(String(id)));
+
+    // (optional) visually clear before refilling so you see the change
+    setAssigned(emptyAssigned());
+
+    const res = await apiFetch(`/api/plan/autopopulate?v=${Date.now()}`, {
+      method: "POST",
+      headers: {
+        "x-api-key": "dev-key-123",
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      },
+      cache: "no-store" as RequestCache,
+      body: JSON.stringify({
+        date: dayKey,
+        nowISO: simulatedNow.toISOString(),
+        allowedIds,
+        assignedSnapshot: {},   // make server ignore existing seats
+        lockedQueueIds,
+        force: true,            // server sets all seats to null before filling
+      }),
+    });
+
+    const data = await res.json();
+    console.log("[autopopulate] debug:", data?.meta?.debug);
+
+    // ✅ FULL REPLACE (no merging)
+    if (data?.assigned && typeof data.assigned === "object") {
+      const next: Assigned = emptyAssigned();
+      for (const [seat, raw] of Object.entries(data.assigned)) {
+        next[seat] = toId(raw);
+      }
+      setAssigned(next);
+    }
+
+    if (data?.breaks) setBreaks(data.breaks);
+    if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+
+    if (Array.isArray(data?.meta?.breakQueue)) {
+      const normalized: QueueEntry[] = asQueueEntriesRaw(data.meta.breakQueue)
+        .map((q) => {
+          const canon = toId(q.guardId);
+          return canon
+            ? { guardId: canon, returnTo: String(q.returnTo), enteredTick: q.enteredTick || 0 }
+            : null;
+        })
+        .filter(Boolean) as QueueEntry[];
+      setBreakQueue(deduplicateQueue(normalized));
+    } else {
+      await fetchQueue();
+    }
+  } catch (e) {
+    console.error("Autopopulate failed:", e);
+  } finally {
+    setIsAutofilling(false);
+  }
+};
+
 
   // util to compute age
   const calcAge = (dob?: string | null): number | null => {
