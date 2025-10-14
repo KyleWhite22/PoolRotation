@@ -1,10 +1,7 @@
 // src/handlers/app.ts
 import serverless from "serverless-http";
-import { createApp } from "../app";
+import { createApp } from "../server";   // ⬅️ change this import
 
 const app = createApp();
 
-// Export the Lambda handler expected by serverless.yml
-export const handler = serverless(app, {
-  requestId: "x-request-id", // optional
-});
+export const handler = serverless(app);  // no special options needed
