@@ -911,14 +911,7 @@ const handleReset = async () => {
 
         {/* MIDDLE: Toolbar + Break Queue */}
         <aside className="space-y-6 lg:sticky lg:top-4 self-start">
-          <ToolbarActions
-            onPlus15={plus15Minutes}
-            onAuto={autopopulate}
-            onNewGuard={() => setCreateOpen(true)}
-            onRefresh={handleReset}
-            disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
-            stamp={""}
-          />
+       
 
           <BreakQueue
             queuesBySection={queuesBySection}
@@ -940,6 +933,14 @@ const handleReset = async () => {
 
         {/* RIGHT: On-duty column */}
         <aside className="space-y-4 lg:sticky lg:top-4 self-start">
+             <ToolbarActions
+            onPlus15={plus15Minutes}
+            onAuto={autopopulate}
+            onNewGuard={() => setCreateOpen(true)}
+            onRefresh={handleReset}
+            disabled={rotatingRef.current || (!anyAssigned && totalQueued === 0)}
+            stamp={""}
+          />
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex flex-col items-center gap-2 text-center">
               <button
