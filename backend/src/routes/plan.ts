@@ -13,6 +13,7 @@ import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 // 🔑 per-instance state helpers
 import { getState, putState, type RotationState } from "../rotation/store";
 import { rotationKey } from "../rotation/rotationKey";
+import crypto from "node:crypto";
 
 // env
 const SANDBOX_TTL_SECS = Number(process.env.SANDBOX_TTL_DAYS || 7) * 24 * 3600;
@@ -381,7 +382,8 @@ router.post("/autopopulate", async (req: any, res) => {
   const allowedIds: string[] = rawAllowed
     .map((v) => toIdLoose(v, knownIds, byName))
     .filter(Boolean) as string[];
-const seed = hashSeed(`${date}|${currentTick}|${allowedIds.join(",")}`);
+const seedBuf = crypto.randomBytes(4);
+const seed = seedBuf.readUInt32LE(0);
 const rnd = mulberry32(seed);
   // Seats: client snapshot wins if provided; fallback to server
   const serverAssigned = await readAssigned(req, date);
