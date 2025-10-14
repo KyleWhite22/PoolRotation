@@ -163,7 +163,7 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-deploy-hgm-prod-us-east-1",
-                "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760405375698-2025-10-14T01:29:35.698Z/hilliard-guard-manager-backend.zip"
+                "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760405470883-2025-10-14T01:31:10.883Z/hilliard-guard-manager-backend.zip"
               },
               "Handler": "dist/handlers/app.handler",
               "Runtime": "nodejs18.x",
@@ -438,7 +438,7 @@
         "artifactsS3KeyDirname": "serverless/hilliard-guard-manager-backend/prod/code-artifacts",
         "deploymentBucket": "serverless-deploy-hgm-prod-us-east-1",
         "artifact": "C:\\Users\\kewhi\\OneDrive\\Desktop\\Projects\\PoolRotation\\backend\\.serverless\\hilliard-guard-manager-backend.zip",
-        "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760405375698-2025-10-14T01:29:35.698Z"
+        "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760405470883-2025-10-14T01:31:10.883Z"
       },
       "functions": {
         "$ref": "$[\"service\"][\"functions\"]"
@@ -453,7 +453,7 @@
     "artifact": "C:\\Users\\kewhi\\OneDrive\\Desktop\\Projects\\PoolRotation\\backend\\.serverless\\hilliard-guard-manager-backend.zip"
   },
   "package": {
-    "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760405375698-2025-10-14T01:29:35.698Z",
+    "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760405470883-2025-10-14T01:31:10.883Z",
     "artifact": "hilliard-guard-manager-backend.zip"
   }
 }
