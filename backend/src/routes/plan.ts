@@ -391,11 +391,13 @@ const rnd = mulberry32(seed);
     string,
     string | null | undefined
   >;
-  const seatsSnapshot: Record<string, string | null> = {};
-  for (const p of POSITIONS) {
-    const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);
-    seatsSnapshot[p.id] = clientVal != null ? clientVal : serverAssigned[p.id] ?? null;
-  }
+  const force = Boolean(req.body?.force);
+const seatsSnapshot: Record<string, string | null> = {};
+for (const p of POSITIONS) {
+  const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);
+  const base = serverAssigned[p.id] ?? null;
+  seatsSnapshot[p.id] = force ? null : (clientVal != null ? clientVal : base);
+}
 
   // Existing queue
   const existingQueue = await readQueue(req, date);
@@ -440,6 +442,9 @@ const rnd = mulberry32(seed);
   }
 shuffleInPlace(minors, rnd);
 shuffleInPlace(adults, rnd);
+console.log("[auto] seed=", seed, "minors sample=", minors.slice(0,3), "adults sample=", adults.slice(0,3));
+console.log("[auto] seated count=", seatedSet.size, "queued count=", queuedSet.size);
+
   const takeRandom = (arr: string[]) =>
   arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null;
 

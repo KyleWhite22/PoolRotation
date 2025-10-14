@@ -808,18 +808,18 @@ const handleReset = async () => {
         (id) => knownIds.has(id) || isUuid(String(id))
       );
 
-      const res = await apiFetch(`/api/plan/autopopulate`, {
-        method: "POST",
-        headers: { "x-api-key": "dev-key-123" },
-        body: JSON.stringify({
-          date: dayKey,
-          nowISO: simulatedNow.toISOString(),
-          allowedIds,
-          assignedSnapshot: assigned,
-          lockedQueueIds,
-        }),
-      });
-
+      const res = await apiFetch(`/api/plan/autopopulate?v=${Date.now()}`, {
+  method: "POST",
+  headers: { "x-api-key": "dev-key-123" },
+  body: JSON.stringify({
+    date: dayKey,
+    nowISO: simulatedNow.toISOString(),
+    allowedIds,
+    assignedSnapshot: {},    // <-- empty so server doesn’t keep old seats
+    lockedQueueIds,
+    force: true              // <-- optional; see server tweak below
+  }),
+});
       const data = await res.json();
 
       if (data?.assigned) {
