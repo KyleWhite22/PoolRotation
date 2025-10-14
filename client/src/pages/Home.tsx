@@ -585,7 +585,7 @@ export default function Home() {
       if (seatId) {
         setAssigned((prev) => ({ ...prev, [seatId]: null } as Assigned));
         try {
-          await apiFetch(`/api/rotations/slot?`, {
+          await apiFetch(`/api/rotations/slot`, {
             method: "POST",
             headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
             cache: "no-store" as RequestCache,
