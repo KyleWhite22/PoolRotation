@@ -821,6 +821,7 @@ const handleReset = async () => {
   }),
 });
       const data = await res.json();
+console.log("[autopopulate] debug:", data?.meta?.debug);
 
       if (data?.assigned) {
         const updates: Partial<Assigned> = {};
