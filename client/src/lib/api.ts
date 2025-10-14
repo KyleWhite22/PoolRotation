@@ -4,7 +4,7 @@ import { getInstanceId } from "./sandbox";
 const API_BASE =
   location.hostname.includes("localhost")
     ? "http://localhost:3000"
-    : "https://vjhz9pp9f9.execute-api.us-east-1.amazonaws.com";
+    : "https://4hwaj6eh6g.execute-api.us-east-1.amazonaws.com";
 
 console.log("[api] API_BASE =", API_BASE);
 (window as any).__API_BASE = API_BASE;
