@@ -585,7 +585,7 @@ export default function Home() {
       if (seatId) {
         setAssigned((prev) => ({ ...prev, [seatId]: null } as Assigned));
         try {
-          await apiFetch(`/api/rotations/slot?v=${Date.now()}`, {
+          await apiFetch(`/api/rotations/slot?`, {
             method: "POST",
             headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
             cache: "no-store" as RequestCache,
@@ -802,7 +802,7 @@ export default function Home() {
       const time = new Date().toISOString().slice(11, 16);
       await Promise.allSettled([
         ...POSITIONS.map((p) =>
-          apiFetch(`/api/rotations/slot?v=` + Date.now(), {
+          apiFetch(`/api/rotations/slot`, {
             method: "POST",
             headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
             body: JSON.stringify({
@@ -815,7 +815,7 @@ export default function Home() {
             cache: "no-store" as RequestCache,
           })
         ),
-        apiFetch(`/api/plan/queue-clear?v=` + Date.now(), {
+        apiFetch(`/api/plan/queue-clear`, {
           method: "POST",
           headers: { "x-api-key": "dev-key-123", "Cache-Control": "no-store" },
           body: JSON.stringify({ date: day }),

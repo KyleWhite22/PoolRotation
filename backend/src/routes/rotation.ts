@@ -48,16 +48,38 @@ function toId(raw: any, known: Set<string>, byName: Map<string, string>) {
 }
 
 // ---- POST /api/rotations/slot  (single seat write; ID-only) ----
+// ---- POST /api/rotations/slot  (single seat write; ID-only) ----
 router.post("/slot", async (req: any, res) => {
   try {
     const date = String(req.body?.date || "");
-    const time = String(req.body?.time || "").slice(0, 8); // HH:MM[:SS] accepted
     const stationId = String(req.body?.stationId || "");
     const notes = String(req.body?.notes || "");
-    if (!date || !time || !stationId)
+
+    // Accept either `time` (HH:MM or HH:MM:SS) OR `nowISO` and derive the other
+    let time = typeof req.body?.time === "string" ? req.body.time : undefined;
+    let nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : undefined;
+
+    // Derive missing pieces
+    if (!time && nowISO) {
+      // prefer a quick slice if it's ISO-like, otherwise parse
+      time = /^[0-9:T\-\.Z]+$/.test(nowISO) ? nowISO.slice(11, 19) : new Date(nowISO).toISOString().slice(11, 19);
+    }
+    if (!nowISO && time) {
+      // if only a time was supplied, build an ISO using date + time
+      // (keeps server timezone-agnostic; uses UTC midnight + time)
+      const hhmmss = time.length >= 5 ? time : "00:00";
+      nowISO = new Date(`${date}T${hhmmss.length === 5 ? hhmmss + ":00" : hhmmss}.000Z`).toISOString();
+    }
+
+    // Normalize time to HH:MM[:SS]
+    if (typeof time === "string") time = time.slice(0, 8);
+
+    if (!date || !time || !stationId) {
       return res.status(400).json({ error: "date, time, stationId required" });
-    if (!VALID_SEATS.has(stationId))
+    }
+    if (!VALID_SEATS.has(stationId)) {
       return res.status(400).json({ error: "invalid stationId" });
+    }
 
     // resolve guard to canonical id (or null to clear)
     const { knownIds, byName } = await loadGuardMaps();
@@ -66,16 +88,14 @@ router.post("/slot", async (req: any, res) => {
     // read current per-instance state
     const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
 
-    // update assigned + updatedAt
+    // update assigned + updatedAt (prefer client nowISO if provided)
     const next: RotationState = {
       ...current,
       assigned: { ...(current.assigned || {}), [stationId]: canon ?? null },
       updatedAt: {
         ...(current.updatedAt || {}),
-        [stationId]: new Date().toISOString(), // or use req.body.nowISO if you send it
+        [stationId]: nowISO || new Date().toISOString(),
       },
-      // optional: keep a small audit trail if you want later
-      // metadata: { ...(current.metadata||{}), lastNotes: notes },
       rev: (current.rev ?? 0) + 1,
     };
 
@@ -90,6 +110,7 @@ router.post("/slot", async (req: any, res) => {
     res.status(500).json({ error: "failed to persist slot" });
   }
 });
+
 
 // ---- GET /api/rotations/day/:date  (latest frame; IDs only) ----
 router.get("/day/:date", async (req: any, res) => {

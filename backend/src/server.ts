@@ -17,8 +17,16 @@ export function createApp() {
     "http://localhost:3000",
   ];
   const ALLOW_METHODS = ["GET", "POST", "PUT", "DELETE", "OPTIONS"];
-  const ALLOW_HEADERS = ["Content-Type", "x-api-key", "x-rotation-instance"];
-
+const ALLOW_HEADERS = [
+  "Content-Type",
+  "x-api-key",
+  "x-rotation-instance",
+  "cache-control",        // ← add this
+  "pragma",               // (optional, sometimes present with cache busting)
+  "accept",               // (safe/common)
+  "origin",               // (safe/common)
+  "x-requested-with"      // (safe/common)
+];
   const corsOptions: CorsOptions = {
     origin: (origin, cb) => {
       if (!origin || ALLOW_ORIGINS.includes(origin)) return cb(null, true);
