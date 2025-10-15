@@ -134,9 +134,9 @@ function isOnShift(nowISO: string, s?: ShiftInfo | null): boolean {
   }
   // Fallback hours
   const day = new Date(nowISO);
-  const open = new Date(day); open.setHours(9, 0, 0, 0);
-  const mid  = new Date(day); mid.setHours(13, 0, 0, 0);
-  const close= new Date(day); close.setHours(17, 0, 0, 0);
+  const open = new Date(day); open.setHours(12, 0, 0, 0);
+  const mid  = new Date(day); mid.setHours(16, 0, 0, 0);
+  const close= new Date(day); close.setHours(20, 0, 0, 0);
   switch (s.shiftType) {
     case "FULL":   return day >= open && day < close;
     case "FIRST":  return day >= open && day < mid;
@@ -500,6 +500,13 @@ router.post("/autopopulate", async (req: any, res) => {
     const base = serverAssigned[p.id] ?? null;
     seatsSnapshot[p.id] = force ? null : clientVal != null ? clientVal : base;
   }
+// After computing seatsSnapshot and allowedFiltered:
+const allowedSet = new Set(allowedFiltered);
+for (const [seat, gid] of Object.entries(seatsSnapshot)) {
+  if (gid && !allowedSet.has(gid)) {
+    seatsSnapshot[seat] = null; // don't keep off-shift in seats
+  }
+}
 
   // Existing queue
   const existingQueue = await readQueue(req, date);

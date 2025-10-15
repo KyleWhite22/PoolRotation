@@ -169,7 +169,7 @@
             "Properties": {
               "Code": {
                 "S3Bucket": "serverless-deploy-hgm-prod-us-east-1",
-                "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760538756906-2025-10-15T14:32:36.906Z/hilliard-guard-manager-backend.zip"
+                "S3Key": "serverless/hilliard-guard-manager-backend/prod/1760541521924-2025-10-15T15:18:41.924Z/hilliard-guard-manager-backend.zip"
               },
               "Handler": "dist/handlers/app.handler",
               "Runtime": "nodejs20.x",
@@ -193,14 +193,14 @@
               "ApiLogGroup"
             ]
           },
-          "ApiLambdaVersionk0z21PHIU7Nz2CGBcv2ydUqEN7w2vsFLks8B6tRxsLA": {
+          "ApiLambdaVersionmDhDnDMdjpoPlfv8wuxyt2LXHJqW0SCLHAfFZNAZn5Y": {
             "Type": "AWS::Lambda::Version",
             "DeletionPolicy": "Retain",
             "Properties": {
               "FunctionName": {
                 "Ref": "ApiLambdaFunction"
               },
-              "CodeSha256": "x0IDaxf1LqFytyk9DfnY1VXpB64fzxKV6yykH9grM4w="
+              "CodeSha256": "V08zCUbFWgXUkrV00FPz+wpNB4HWvb13E3xDQTggQlo="
             }
           },
           "HttpApi": {
@@ -331,7 +331,7 @@
           "ApiLambdaFunctionQualifiedArn": {
             "Description": "Current Lambda function version",
             "Value": {
-              "Ref": "ApiLambdaVersionk0z21PHIU7Nz2CGBcv2ydUqEN7w2vsFLks8B6tRxsLA"
+              "Ref": "ApiLambdaVersionmDhDnDMdjpoPlfv8wuxyt2LXHJqW0SCLHAfFZNAZn5Y"
             },
             "Export": {
               "Name": "sls-hilliard-guard-manager-backend-prod-ApiLambdaFunctionQualifiedArn"
@@ -392,7 +392,7 @@
         "timeout": 15,
         "runtime": "nodejs20.x",
         "vpc": {},
-        "versionLogicalId": "ApiLambdaVersionk0z21PHIU7Nz2CGBcv2ydUqEN7w2vsFLks8B6tRxsLA"
+        "versionLogicalId": "ApiLambdaVersionmDhDnDMdjpoPlfv8wuxyt2LXHJqW0SCLHAfFZNAZn5Y"
       }
     },
     "configValidationMode": "warn",
@@ -416,7 +416,7 @@
         "artifactsS3KeyDirname": "serverless/hilliard-guard-manager-backend/prod/code-artifacts",
         "deploymentBucket": "serverless-deploy-hgm-prod-us-east-1",
         "artifact": "C:\\Users\\kewhi\\OneDrive\\Desktop\\Projects\\PoolRotation\\backend\\.serverless\\hilliard-guard-manager-backend.zip",
-        "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760538756906-2025-10-15T14:32:36.906Z"
+        "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760541521924-2025-10-15T15:18:41.924Z"
       },
       "functions": {
         "$ref": "$[\"service\"][\"functions\"]"
@@ -431,7 +431,7 @@
     "artifact": "C:\\Users\\kewhi\\OneDrive\\Desktop\\Projects\\PoolRotation\\backend\\.serverless\\hilliard-guard-manager-backend.zip"
   },
   "package": {
-    "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760538756906-2025-10-15T14:32:36.906Z",
+    "artifactDirectoryName": "serverless/hilliard-guard-manager-backend/prod/1760541521924-2025-10-15T15:18:41.924Z",
     "artifact": "hilliard-guard-manager-backend.zip"
   }
 }

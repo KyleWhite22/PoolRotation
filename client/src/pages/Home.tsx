@@ -116,7 +116,7 @@ export default function Home() {
   const [breakQueue, setBreakQueue] = useState<QueueEntry[]>([]); // CANONICAL queue
 
   // --- Roster / shifts (per day) ---
-  const [roster, setRoster] = useState<Roster>(initialSnap?.roster ?? {});
+  const [roster, setRoster] = useState<Roster>({});
   const [rosterOpen, setRosterOpen] = useState(false);
 
   // --- Derived buckets from canonical flat queue ---
@@ -180,10 +180,10 @@ export default function Home() {
     if (initialSnap?.onDutyIds) return new Set(initialSnap.onDutyIds);
     try {
       const raw = localStorage.getItem(`onDuty:${initialDayKey}`);
-      return new Set(raw ? (JSON.parse(raw) as string[]) : []);
-    } catch {
-      return new Set();
-    }
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch {}
+    // default: we'll auto-fill from roster once it loads
+    return new Set();
   });
 
   // ---------- Persistence guards ----------
@@ -271,11 +271,9 @@ export default function Home() {
       });
       if (!res.ok) throw new Error(`GET /api/plan/roster ${res.status}`);
       const data = await res.json();
-      const r: Roster = (data?.roster ?? {}) as Roster;
-      setRoster(r);
-    } catch (e) {
-      console.error("fetchRoster error:", e);
-      setRoster((prev) => prev); // keep local
+      setRoster(data.roster || {});
+    } catch (err) {
+      console.error("fetchRoster error:", err);
     }
   }, [dayKey]);
 
@@ -380,37 +378,45 @@ export default function Home() {
     return s;
   }, [breakQueue]);
 
-  // ---- Shift helpers (frontend mirror of server logic) ----
+  // ---- Shift helpers (frontend mirror; FIRST 12–4, SECOND 4–8, FULL 12–8) ----
   const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
     if (!s) return false;
-    if (s.startISO && s.endISO) {
+
+    // If explicit custom window, respect it
+    if (s.shiftType === "CUSTOM" && s.startISO && s.endISO) {
       const now = new Date(nowISO);
-      const start = new Date(s.startISO);
-      const end = new Date(s.endISO);
-      return now >= start && now < end;
+      return now >= new Date(s.startISO) && now < new Date(s.endISO);
     }
-    const day = new Date(nowISO);
-    const open = new Date(day);
-    open.setHours(9, 0, 0, 0);
-    const mid = new Date(day);
-    mid.setHours(13, 0, 0, 0);
-    const close = new Date(day);
-    close.setHours(17, 0, 0, 0);
+
+    const d = new Date(nowISO);
+    const firstStart = new Date(d); firstStart.setHours(12, 0, 0, 0);
+    const firstEnd   = new Date(d); firstEnd.setHours(16, 0, 0, 0);
+    const secondEnd  = new Date(d); secondEnd.setHours(20, 0, 0, 0);
+
     switch (s.shiftType) {
-      case "FULL":
-        return day >= open && day < close;
-      case "FIRST":
-        return day >= open && day < mid;
-      case "SECOND":
-        return day >= mid && day < close;
-      case "CUSTOM":
-        return false; // CUSTOM without times is treated as off
-      default:
-        return false;
+      case "FIRST":  return d >= firstStart && d < firstEnd;
+      case "SECOND": return d >= firstEnd && d < secondEnd;
+      case "FULL":   return d >= firstStart && d < secondEnd; // full day = 12–8
+      case "CUSTOM": return false; // CUSTOM without both times => off
+      default:       return false;
     }
   }, []);
 
-  // on-duty but not seated/queued (we'll show both on/off shift, but tag them)
+  // ✅ Auto-populate on-duty with everyone currently on-shift (only when empty)
+  useEffect(() => {
+    if (!guardsLoaded) return;
+    if (!roster || Object.keys(roster).length === 0) return;
+
+    if (onDutyIds.size === 0) {
+      const nowISO = simulatedNow.toISOString();
+      const onShiftIds = guards
+        .filter((g) => isOnShift(nowISO, roster[g.id] || { shiftType: "FULL" }))
+        .map((g) => g.id);
+      setOnDutyIds(new Set(onShiftIds));
+    }
+  }, [guardsLoaded, roster, simulatedNow, guards, onDutyIds.size, isOnShift]);
+
+  // on-duty but not seated/queued (tag off-shift)
   const onDutyUnassigned: (Guard & { _onShift: boolean })[] = useMemo(() => {
     const onDuty = new Set(
       [...onDutyIds]
@@ -538,7 +544,7 @@ export default function Home() {
     if (!gid) return;
     if (seatedSet.has(gid)) return;
 
-    // Frontend guard: must be on-duty AND on-shift
+    // Frontend guard: must be on-duty AND on-shift now
     const onShiftNow = isOnShift(simulatedNow.toISOString(), roster[gid]);
     if (!onDutyIds.has(gid) || !onShiftNow) {
       alert("Only on-duty guards who are currently on shift can be seated.");
@@ -786,10 +792,12 @@ export default function Home() {
     try {
       if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
-
+      // ✅ Only allow guards who are on-duty AND on-shift at the new time
       const newNow = new Date(simulatedNow.getTime() + 15 * 60 * 1000);
       setSimulatedNow(newNow);
+
+      const allowedIdsAll = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+      const allowedIds = allowedIdsAll.filter((gid) => isOnShift(newNow.toISOString(), roster[gid]));
 
       const res = await apiFetch(`/api/plan/rotate`, {
         method: "POST",
@@ -893,9 +901,14 @@ export default function Home() {
     try {
       if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+      // ✅ Only pass guards that are on-duty AND on-shift *now*
+      const allowedIdsAll = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+      const allowedIds = allowedIdsAll.filter((gid) =>
+        isOnShift(simulatedNow.toISOString(), roster[gid])
+      );
+
       if (allowedIds.length === 0) {
-        alert("Select at least one on-duty guard before Autopopulate.");
+        alert("No on-shift guards selected. Select on-duty guards who are currently on shift.");
         return;
       }
 
@@ -917,10 +930,10 @@ export default function Home() {
         body: JSON.stringify({
           date: dayKey,
           nowISO: simulatedNow.toISOString(),
-          allowedIds,
-          assignedSnapshot: {}, // make server ignore existing seats
+          allowedIds,            // <-- filtered to on-shift
+          assignedSnapshot: {},  // make server ignore existing seats
           lockedQueueIds,
-          force: true, // server sets all seats to null before filling
+          force: true,           // server sets all seats to null before filling
         }),
       });
 
@@ -1314,7 +1327,6 @@ function RosterEditorModal({
     const [h, m] = t.split(":").map((x) => parseInt(x || "0", 10));
     d.setHours(h || 0, m || 0, 0, 0);
     return d.toISOString();
-    // (server will interpret as absolute ISO; this keeps same local day)
   };
 
   return (
@@ -1369,9 +1381,9 @@ function RosterEditorModal({
                         value={v.shiftType}
                         onChange={(e) => setFor(g.id, { shiftType: e.target.value as ShiftType })}
                       >
-                        <option value="FULL">Full shift (all day)</option>
-                        <option value="FIRST">First shift</option>
-                        <option value="SECOND">Second shift</option>
+                        <option value="FULL">Full shift (12–8)</option>
+                        <option value="FIRST">First shift (12–4)</option>
+                        <option value="SECOND">Second shift (4–8)</option>
                         <option value="CUSTOM">Custom</option>
                       </select>
                     </td>
