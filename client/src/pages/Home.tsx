@@ -394,21 +394,32 @@ const minutesInTZ = (iso: string) => {
   const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
   return hh * 60 + mm;
 };
-
 const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
   if (!s) return false;
+
   if (s.shiftType === "CUSTOM" && s.startISO && s.endISO) {
     const now = new Date(nowISO);
     return now >= new Date(s.startISO) && now < new Date(s.endISO);
   }
-  const m = minutesInTZ(nowISO);
-  const FIRST_START = 12 * 60, FIRST_END = 16 * 60;
-  const SECOND_START= 16 * 60, SECOND_END= 20 * 60;
-  const FULL_START = FIRST_START, FULL_END = SECOND_END;
+
+  const d = new Date(nowISO);
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+  const parts = fmt.formatToParts(d).reduce((m, p) => ((m[p.type] = p.value), m), {} as any);
+  const H = Number(parts.hour), M = Number(parts.minute), S = Number(parts.second);
+  const hm = H * 3600 + M * 60 + S;
+
+  const at = (h: number, m = 0) => h * 3600 + m * 60;
+  const FIRST_START = at(12,0), FIRST_END = at(16,0);
+  const SECOND_START = at(16,0), SECOND_END = at(20,0);
+  const FULL_START = at(12,0), FULL_END = at(20,0);
+
   switch (s.shiftType) {
-    case "FIRST":  return m >= FIRST_START  && m < FIRST_END;
-    case "SECOND": return m >= SECOND_START && m < SECOND_END;
-    case "FULL":   return m >= FULL_START   && m < FULL_END;
+    case "FIRST":  return hm >= FIRST_START  && hm < FIRST_END;
+    case "SECOND": return hm >= SECOND_START && hm < SECOND_END;
+    case "FULL":   return hm >= FULL_START   && hm < FULL_END;
     default:       return false;
   }
 }, []);
