@@ -17,7 +17,7 @@ type Guard = {
 };
 
 // --- Utils ---
-function calcAge(dob?: string | null): number | null {
+function calcAge(dob?: string | null): number | null  {
   if (!dob) return null;
   const d = new Date(dob);
   if (isNaN(d.getTime())) return null;
@@ -27,7 +27,21 @@ function calcAge(dob?: string | null): number | null {
   if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
   return age;
 }
+// Format YYYY-MM-DD (or any parseable date) -> MM-DD-YYYY for display
+function formatDOB_MDY(dob?: string | null): string {
+  if (!dob) return "";
+  // Fast path for ISO
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dob);
+  if (m) return `${m[2]}-${m[3]}-${m[1]}`;
 
+  // Fallback: try Date parsing and render as MM-DD-YYYY
+  const d = new Date(dob);
+  if (isNaN(d.getTime())) return String(dob);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${mm}-${dd}-${yyyy}`;
+}
 type SortKey = "name" | "age" | "dob" | "phone";
 type SortDir = "asc" | "desc";
 
@@ -299,8 +313,9 @@ export default function GuardsPage() {
                         />
                       </td>
                       <td className="p-2">{g.name || <span className="text-slate-500">—</span>}</td>
-                      <td className="p-2">{g.dob || <span className="text-slate-500">—</span>}</td>
-                      <td className="p-2">
+<td className="p-2">
+  {g.dob ? formatDOB_MDY(g.dob) : <span className="text-slate-500">—</span>}
+</td>                      <td className="p-2">
                         {calcAge(g.dob ?? null) ?? <span className="text-slate-500">—</span>}
                       </td>
                       <td className="p-2">{g.phone || <span className="text-slate-500">—</span>}</td>
