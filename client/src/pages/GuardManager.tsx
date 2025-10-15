@@ -118,8 +118,20 @@ export default function GuardsPage() {
     filtered.sort((a, b) => {
       let res = 0;
       if (sortKey === "name") {
-        res = (a.name ?? "").localeCompare(b.name ?? "", undefined, { sensitivity: "base" });
-      } else if (sortKey === "age") {
+  const getLastNameKey = (full: string | undefined | null) => {
+    if (!full) return "";
+    const parts = full.trim().split(/\s+/);
+    if (parts.length === 1) return parts[0].toLowerCase();
+    const last = parts[parts.length - 1].toLowerCase();
+    const first = parts.slice(0, -1).join(" ").toLowerCase();
+    return `${last},${first}`; // ensures stable sort by last, then first
+  };
+
+  const aKey = getLastNameKey(a.name);
+  const bKey = getLastNameKey(b.name);
+  res = aKey.localeCompare(bKey, undefined, { sensitivity: "base" });
+}
+ else if (sortKey === "age") {
         const aa = (a as any).age as number | null;
         const bb = (b as any).age as number | null;
         if (aa == null && bb == null) res = 0;
