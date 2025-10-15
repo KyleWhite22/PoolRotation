@@ -16,6 +16,10 @@ type BreakState = Record<string, string>;
 type ConflictUI = { stationId: string; guardId: string; reason: string };
 type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
 
+type ShiftType = "FIRST" | "SECOND" | "FULL" | "CUSTOM";
+type ShiftInfo = { shiftType: ShiftType; startISO?: string; endISO?: string };
+type Roster = Record<string, ShiftInfo>;
+
 const strip = (s: string) => (s?.startsWith?.("GUARD#") ? s.slice(6) : s);
 const ymdLocal = (d: Date) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(d); // YYYY-MM-DD
@@ -66,6 +70,7 @@ type DaySnapshot = {
   conflicts: ConflictUI[];
   onDutyIds: string[];
   simulatedNowISO: string;
+  roster?: Roster;
 };
 const SNAP_KEY = (day: string) => `snapshot:${day}`;
 const loadSnapshot = (day: string): DaySnapshot | null => {
@@ -109,6 +114,10 @@ export default function Home() {
   const [breaks, setBreaks] = useState<BreakState>({});
   const [conflicts, setConflicts] = useState<ConflictUI[]>([]);
   const [breakQueue, setBreakQueue] = useState<QueueEntry[]>([]); // CANONICAL queue
+
+  // --- Roster / shifts (per day) ---
+  const [roster, setRoster] = useState<Roster>(initialSnap?.roster ?? {});
+  const [rosterOpen, setRosterOpen] = useState(false);
 
   // --- Derived buckets from canonical flat queue ---
   const queuesBySection = useMemo(() => {
@@ -191,9 +200,10 @@ export default function Home() {
       conflicts,
       onDutyIds: [...onDutyIds],
       simulatedNowISO: simulatedNow.toISOString(),
+      roster,
     };
     saveSnapshot(dayKey, snap);
-  }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey]);
+  }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey, roster]);
 
   useEffect(() => {
     if (!guardsLoaded) return;
@@ -253,6 +263,46 @@ export default function Home() {
       if (!silent) setLoading(false);
     }
   }, []);
+
+  const fetchRoster = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/plan/roster?date=${dayKey}`, {
+        headers: { "x-api-key": "dev-key-123" },
+      });
+      if (!res.ok) throw new Error(`GET /api/plan/roster ${res.status}`);
+      const data = await res.json();
+      const r: Roster = (data?.roster ?? {}) as Roster;
+      setRoster(r);
+    } catch (e) {
+      console.error("fetchRoster error:", e);
+      setRoster((prev) => prev); // keep local
+    }
+  }, [dayKey]);
+
+  const upsertRoster = useCallback(
+    async (gid: string, info: ShiftInfo) => {
+      try {
+        const body = {
+          date: dayKey,
+          guardId: gid,
+          shiftType: info.shiftType,
+          startISO: info.startISO || undefined,
+          endISO: info.endISO || undefined,
+        };
+        const res = await apiFetch(`/api/plan/roster-upsert`, {
+          method: "POST",
+          headers: { "x-api-key": "dev-key-123", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`POST roster-upsert ${res.status}`);
+        const data = await res.json();
+        setRoster(data?.roster ?? {});
+      } catch (e) {
+        console.error("roster-upsert failed:", e);
+      }
+    },
+    [dayKey]
+  );
 
   // listeners
   useEffect(() => {
@@ -330,8 +380,38 @@ export default function Home() {
     return s;
   }, [breakQueue]);
 
-  // on-duty but not seated/queued
-  const onDutyUnassigned: Guard[] = useMemo(() => {
+  // ---- Shift helpers (frontend mirror of server logic) ----
+  const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
+    if (!s) return false;
+    if (s.startISO && s.endISO) {
+      const now = new Date(nowISO);
+      const start = new Date(s.startISO);
+      const end = new Date(s.endISO);
+      return now >= start && now < end;
+    }
+    const day = new Date(nowISO);
+    const open = new Date(day);
+    open.setHours(9, 0, 0, 0);
+    const mid = new Date(day);
+    mid.setHours(13, 0, 0, 0);
+    const close = new Date(day);
+    close.setHours(17, 0, 0, 0);
+    switch (s.shiftType) {
+      case "FULL":
+        return day >= open && day < close;
+      case "FIRST":
+        return day >= open && day < mid;
+      case "SECOND":
+        return day >= mid && day < close;
+      case "CUSTOM":
+        return false; // CUSTOM without times is treated as off
+      default:
+        return false;
+    }
+  }, []);
+
+  // on-duty but not seated/queued (we'll show both on/off shift, but tag them)
+  const onDutyUnassigned: (Guard & { _onShift: boolean })[] = useMemo(() => {
     const onDuty = new Set(
       [...onDutyIds]
         .map((id) => toId(id))
@@ -344,8 +424,11 @@ export default function Home() {
       const canon = toId(id);
       if (canon) inUse.add(canon);
     }
-    return guards.filter((g) => onDuty.has(g.id) && !inUse.has(g.id));
-  }, [guards, onDutyIds, assigned, breakQueue, movingIds, knownIds, toId]);
+    const nowISO = simulatedNow.toISOString();
+    return guards
+      .filter((g) => onDuty.has(g.id) && !inUse.has(g.id))
+      .map((g) => ({ ...g, _onShift: isOnShift(nowISO, roster[g.id]) }));
+  }, [guards, onDutyIds, assigned, breakQueue, movingIds, knownIds, toId, roster, simulatedNow, isOnShift]);
 
   // ---------- Network helpers (queue) ----------
   const persistQueueFlat = async (flat: QueueEntry[]) => {
@@ -377,7 +460,7 @@ export default function Home() {
     setBreakQueue(deduplicateQueue(normalized));
   };
 
-  // ---------- Hydrate assigned & then fetch data ----------
+  // ---------- Hydrate assigned & fetch data ----------
   useLayoutEffect(() => {
     assignedHydratedRef.current = false;
     allowPersistRef.current = false;
@@ -401,11 +484,13 @@ export default function Home() {
       setBreaks(snap.breaks ?? {});
       setConflicts(Array.isArray(snap.conflicts) ? snap.conflicts : []);
       setOnDutyIds(new Set(snap.onDutyIds ?? []));
+      setRoster(snap.roster ?? {});
     } else {
       const d = new Date();
       d.setHours(12, 0, 0, 0);
       setSimulatedNow(d);
       setOnDutyIds(new Set());
+      setRoster({});
     }
 
     assignedHydratedRef.current = true;
@@ -417,6 +502,7 @@ export default function Home() {
     if (!bootstrappedFromLocal) {
       void fetchAssignments();
       void fetchQueue();
+      void fetchRoster();
     }
     void fetchGuards();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -451,6 +537,13 @@ export default function Home() {
     const gid = toId(guardId);
     if (!gid) return;
     if (seatedSet.has(gid)) return;
+
+    // Frontend guard: must be on-duty AND on-shift
+    const onShiftNow = isOnShift(simulatedNow.toISOString(), roster[gid]);
+    if (!onDutyIds.has(gid) || !onShiftNow) {
+      alert("Only on-duty guards who are currently on shift can be seated.");
+      return;
+    }
 
     setAssigned((prev) => ({ ...prev, [positionId]: gid } as Assigned));
     try {
@@ -647,8 +740,11 @@ export default function Home() {
   const handleSeatDrop = async (destSeatId: string, guardId: string) => {
     const gid = toId(guardId);
     if (!gid) return;
-    if (!onDutyIds.has(gid)) {
-      alert("Only on-duty guards can be seated.");
+
+    // Frontend guard: must be on-duty AND on-shift
+    const onShiftNow = isOnShift(simulatedNow.toISOString(), roster[gid]);
+    if (!onDutyIds.has(gid) || !onShiftNow) {
+      alert("Only on-duty guards who are currently on shift can be seated.");
       return;
     }
 
@@ -766,103 +862,102 @@ export default function Home() {
     }
   };
 
-const handleReset = async () => {
-  try {
-    // 1️⃣ Clear all local/session storage
-    localStorage.clear();
-    sessionStorage.clear();
+  const handleReset = async () => {
+    try {
+      // 1️⃣ Clear all local/session storage
+      localStorage.clear();
+      sessionStorage.clear();
 
-    // 2️⃣ Clear service-worker caches
-    if ('caches' in window) {
-      const names = await caches.keys();
-      await Promise.all(names.map(n => caches.delete(n)));
+      // 2️⃣ Clear service-worker caches
+      if ("caches" in window) {
+        const names = await caches.keys();
+        await Promise.all(names.map((n) => caches.delete(n)));
+      }
+
+      // 3️⃣ Unregister any service workers
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const reg of regs) await reg.unregister();
+      }
+    } catch (err) {
+      console.warn("Full site-data clear failed:", err);
+    } finally {
+      // 4️⃣ Hard reload
+      const { origin, pathname } = window.location;
+      window.location.replace(`${origin}${pathname}?r=${Date.now()}`);
     }
-
-    // 3️⃣ Unregister any service workers
-    if ('serviceWorker' in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      for (const reg of regs) await reg.unregister();
-    }
-  } catch (err) {
-    console.warn('Full site-data clear failed:', err);
-  } finally {
-    // 4️⃣ Hard reload (forces fresh JS, CSS, API_BASE, etc.)
-    const { origin, pathname } = window.location;
-    window.location.replace(`${origin}${pathname}?r=${Date.now()}`);
-  }
-};
-
+  };
 
   const autopopulate = async () => {
-  setIsAutofilling(true);
-  try {
-    if (guardsDirtyRef.current) await fetchGuards({ silent: true });
+    setIsAutofilling(true);
+    try {
+      if (guardsDirtyRef.current) await fetchGuards({ silent: true });
 
-    const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
-    if (allowedIds.length === 0) {
-      alert("Select at least one on-duty guard before Autopopulate.");
-      return;
-    }
-
-    const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId)))
-      .filter((id) => knownIds.has(id) || isUuid(String(id)));
-
-    // (optional) visually clear before refilling so you see the change
-    setAssigned(emptyAssigned());
-
-    const res = await apiFetch(`/api/plan/autopopulate?v=${Date.now()}`, {
-      method: "POST",
-      headers: {
-        "x-api-key": "dev-key-123",
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
-      },
-      cache: "no-store" as RequestCache,
-      body: JSON.stringify({
-        date: dayKey,
-        nowISO: simulatedNow.toISOString(),
-        allowedIds,
-        assignedSnapshot: {},   // make server ignore existing seats
-        lockedQueueIds,
-        force: true,            // server sets all seats to null before filling
-      }),
-    });
-
-    const data = await res.json();
-    console.log("[autopopulate] debug:", data?.meta?.debug);
-
-    // ✅ FULL REPLACE (no merging)
-    if (data?.assigned && typeof data.assigned === "object") {
-      const next: Assigned = emptyAssigned();
-      for (const [seat, raw] of Object.entries(data.assigned)) {
-        next[seat] = toId(raw);
+      const allowedIds = [...onDutyIds].filter((id) => knownIds.has(id) || isUuid(String(id)));
+      if (allowedIds.length === 0) {
+        alert("Select at least one on-duty guard before Autopopulate.");
+        return;
       }
-      setAssigned(next);
+
+      const lockedQueueIds = Array.from(new Set(breakQueue.map((q) => q.guardId))).filter(
+        (id) => knownIds.has(id) || isUuid(String(id))
+      );
+
+      // (optional) visually clear before refilling so you see the change
+      setAssigned(emptyAssigned());
+
+      const res = await apiFetch(`/api/plan/autopopulate?v=${Date.now()}`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "dev-key-123",
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        },
+        cache: "no-store" as RequestCache,
+        body: JSON.stringify({
+          date: dayKey,
+          nowISO: simulatedNow.toISOString(),
+          allowedIds,
+          assignedSnapshot: {}, // make server ignore existing seats
+          lockedQueueIds,
+          force: true, // server sets all seats to null before filling
+        }),
+      });
+
+      const data = await res.json();
+      console.log("[autopopulate] debug:", data?.meta?.debug);
+
+      // ✅ FULL REPLACE (no merging)
+      if (data?.assigned && typeof data.assigned === "object") {
+        const next: Assigned = emptyAssigned();
+        for (const [seat, raw] of Object.entries(data.assigned)) {
+          next[seat] = toId(raw);
+        }
+        setAssigned(next);
+      }
+
+      if (data?.breaks) setBreaks(data.breaks);
+      if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
+
+      if (Array.isArray(data?.meta?.breakQueue)) {
+        const normalized: QueueEntry[] = asQueueEntriesRaw(data.meta.breakQueue)
+          .map((q) => {
+            const canon = toId(q.guardId);
+            return canon
+              ? { guardId: canon, returnTo: String(q.returnTo), enteredTick: q.enteredTick || 0 }
+              : null;
+          })
+          .filter(Boolean) as QueueEntry[];
+        setBreakQueue(deduplicateQueue(normalized));
+      } else {
+        await fetchQueue();
+      }
+    } catch (e) {
+      console.error("Autopopulate failed:", e);
+    } finally {
+      setIsAutofilling(false);
     }
-
-    if (data?.breaks) setBreaks(data.breaks);
-    if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
-
-    if (Array.isArray(data?.meta?.breakQueue)) {
-      const normalized: QueueEntry[] = asQueueEntriesRaw(data.meta.breakQueue)
-        .map((q) => {
-          const canon = toId(q.guardId);
-          return canon
-            ? { guardId: canon, returnTo: String(q.returnTo), enteredTick: q.enteredTick || 0 }
-            : null;
-        })
-        .filter(Boolean) as QueueEntry[];
-      setBreakQueue(deduplicateQueue(normalized));
-    } else {
-      await fetchQueue();
-    }
-  } catch (e) {
-    console.error("Autopopulate failed:", e);
-  } finally {
-    setIsAutofilling(false);
-  }
-};
-
+  };
 
   // util to compute age
   const calcAge = (dob?: string | null): number | null => {
@@ -910,8 +1005,6 @@ const handleReset = async () => {
 
         {/* MIDDLE: Toolbar + Break Queue */}
         <aside className="space-y-6 lg:sticky lg:top-4 self-start">
-       
-
           <BreakQueue
             queuesBySection={queuesBySection}
             flatQueue={breakQueue}
@@ -930,9 +1023,9 @@ const handleReset = async () => {
           />
         </aside>
 
-        {/* RIGHT: On-duty column */}
+        {/* RIGHT: On-duty + Roster column */}
         <aside className="space-y-4 lg:sticky lg:top-4 self-start">
-             <ToolbarActions
+          <ToolbarActions
             onPlus15={plus15Minutes}
             onAuto={autopopulate}
             onNewGuard={() => setCreateOpen(true)}
@@ -943,19 +1036,39 @@ const handleReset = async () => {
           <section className="rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
             <div className="flex flex-col items-center gap-2 text-center">
               <button
-                className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-200 text-sm"
+                className="px-3 py-2 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-900 font-medium text-sm"
                 onClick={() => setOnDutyOpen(true)}
               >
                 Select On-Duty Guards {guards.length ? `(${guards.length})` : ""}
               </button>
+              <button
+                className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm"
+                onClick={() => setRosterOpen(true)}
+                title="Assign FIRST/SECOND/FULL or custom time window"
+              >
+                Edit Shifts (Roster)
+              </button>
               <p className="text-slate-400 text-sm">
-                Selected: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+                On-duty: <span className="text-slate-200 font-medium">{onDutyIds.size}</span>
+                {" · "}
+                On-shift now:{" "}
+                <span className="text-slate-200 font-medium">
+                  {
+                    [...onDutyIds].filter((id) => {
+                      const gid = toId(id);
+                      return gid && isOnShift(simulatedNow.toISOString(), roster[gid]);
+                    }).length
+                  }
+                </span>
               </p>
             </div>
           </section>
 
-          {/* onDutyUnassigned is derived from single canonical queue + seats */}
-          <OnDutyBench guards={onDutyUnassigned} onDropGuardToBench={handleBenchDrop} />
+          {/* onDutyUnassigned is derived; tag off-shift visually */}
+          <OnDutyBench
+            guards={onDutyUnassigned}
+            onDropGuardToBench={handleBenchDrop}
+          />
         </aside>
       </div>
 
@@ -995,6 +1108,20 @@ const handleReset = async () => {
         guards={guards}
         value={onDutyIds}
         onChange={setOnDutyIds}
+      />
+
+      {/* Roster editor modal */}
+      <RosterEditorModal
+        open={rosterOpen}
+        onClose={() => setRosterOpen(false)}
+        guards={guards}
+        roster={roster}
+        nowISO={simulatedNow.toISOString()}
+        onUpsert={async (gid, info) => {
+          setRoster((prev) => ({ ...prev, [gid]: info }));
+          await upsertRoster(gid, info);
+        }}
+        isOnShift={isOnShift}
       />
 
       <GuardsListModal open={listOpen} onClose={() => setListOpen(false)} guards={guards} />
@@ -1132,13 +1259,193 @@ function OnDutySelectorModal({
   );
 }
 
+// --- Roster (shift) editor modal ---
+function RosterEditorModal({
+  open,
+  onClose,
+  guards,
+  roster,
+  onUpsert,
+  nowISO,
+  isOnShift,
+}: {
+  open: boolean;
+  onClose: () => void;
+  guards: Guard[];
+  roster: Roster;
+  onUpsert: (gid: string, info: ShiftInfo) => Promise<void> | void;
+  nowISO: string;
+  isOnShift: (nowISO: string, s?: ShiftInfo | null) => boolean;
+}) {
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  const normName = (s: string) =>
+    s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
+  const filtered = useMemo(() => {
+    const q = normName(query);
+    if (!q) return guards;
+    return guards.filter((g) => normName(g.name || g.id).includes(q));
+  }, [guards, query]);
+
+  const [editing, setEditing] = useState<{ [gid: string]: ShiftInfo }>({});
+
+  useEffect(() => {
+    if (!open) return;
+    const init: { [gid: string]: ShiftInfo } = {};
+    for (const g of guards) {
+      init[g.id] = roster[g.id] || { shiftType: "FULL" };
+    }
+    setEditing(init);
+  }, [open, guards, roster]);
+
+  if (!open) return null;
+
+  const setFor = (gid: string, patch: Partial<ShiftInfo>) => {
+    setEditing((prev) => ({ ...prev, [gid]: { ...(prev[gid] || { shiftType: "FULL" }), ...patch } }));
+  };
+
+  const timeLocalToISO = (t: string) => {
+    // t as "HH:MM"
+    const d = new Date(nowISO);
+    const [h, m] = t.split(":").map((x) => parseInt(x || "0", 10));
+    d.setHours(h || 0, m || 0, 0, 0);
+    return d.toISOString();
+    // (server will interpret as absolute ISO; this keeps same local day)
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      onKeyDown={(e) => e.key === "Escape" && onClose()}
+    >
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative w-[min(1000px,95vw)] max-h-[88vh] overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-xl">
+        <header className="p-4 border-b border-slate-700 flex items-center gap-3">
+          <h3 className="text-slate-100 font-semibold">Edit Shifts (Roster)</h3>
+          <div className="ml-auto flex items-center gap-2">
+            <input
+              type="text"
+              placeholder="Search guards…"
+              className="rounded-lg bg-slate-800/80 border border-slate-700 px-3 py-1.5 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-500"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <button
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm"
+              onClick={onClose}
+            >
+              Done
+            </button>
+          </div>
+        </header>
+
+        <div className="overflow-auto max-h-[72vh]">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-slate-900/95 backdrop-blur border-b border-slate-700">
+              <tr className="[&>th]:px-3 [&>th]:py-2 text-slate-300 text-left">
+                <th>Guard</th>
+                <th>Shift</th>
+                <th>Custom window</th>
+                <th>Now</th>
+                <th className="text-right pr-4">Save</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800">
+              {filtered.map((g) => {
+                const v = editing[g.id] || { shiftType: "FULL" };
+                const on = isOnShift(nowISO, v);
+                return (
+                  <tr key={g.id} className="[&>td]:px-3 [&>td]:py-2">
+                    <td className="text-slate-100">{g.name || g.id}</td>
+                    <td>
+                      <select
+                        className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-100"
+                        value={v.shiftType}
+                        onChange={(e) => setFor(g.id, { shiftType: e.target.value as ShiftType })}
+                      >
+                        <option value="FULL">Full shift (all day)</option>
+                        <option value="FIRST">First shift</option>
+                        <option value="SECOND">Second shift</option>
+                        <option value="CUSTOM">Custom</option>
+                      </select>
+                    </td>
+                    <td>
+                      {v.shiftType === "CUSTOM" ? (
+                        <div className="flex items-center gap-2">
+                          <label className="text-slate-300">Start</label>
+                          <input
+                            type="time"
+                            className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-100"
+                            onChange={(e) =>
+                              setFor(g.id, { startISO: timeLocalToISO(e.target.value) })
+                            }
+                          />
+                          <label className="text-slate-300">End</label>
+                          <input
+                            type="time"
+                            className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-100"
+                            onChange={(e) =>
+                              setFor(g.id, { endISO: timeLocalToISO(e.target.value) })
+                            }
+                          />
+                        </div>
+                      ) : (
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium " +
+                          (on
+                            ? "bg-green-500/20 text-green-300 border border-green-600/50"
+                            : "bg-slate-700/40 text-slate-300 border border-slate-600/60")
+                        }
+                        title={on ? "On shift now" : "Off shift now"}
+                      >
+                        {on ? "On shift" : "Off"}
+                      </span>
+                    </td>
+                    <td className="text-right">
+                      <button
+                        className="px-3 py-1.5 rounded-lg bg-pool-500 hover:bg-pool-400 text-slate-900"
+                        onClick={() => onUpsert(g.id, v)}
+                        title="Save this guard's shift"
+                      >
+                        Save
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {!filtered.length && (
+                <tr>
+                  <td colSpan={5} className="text-center text-slate-400 py-6">
+                    No guards match your search.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // --- On-duty bench (drag sources) ---
 function OnDutyBench({
   guards,
   title = "On-duty (unassigned)",
   onDropGuardToBench,
 }: {
-  guards: { id: string; name: string }[];
+  guards: ({ id: string; name: string } & { _onShift?: boolean })[];
   title?: string;
   onDropGuardToBench: (guardId: string, e: React.DragEvent) => void;
 }) {
@@ -1220,23 +1527,45 @@ function OnDutyBench({
           <p className="text-sm text-slate-400 px-1 py-2">No on-duty guards waiting.</p>
         ) : (
           <ul className="flex flex-wrap gap-2">
-            {guards.map((g) => (
-              <li
-                key={g.id}
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.effectAllowed = "move";
-                  e.dataTransfer.setData("application/x-guard-id", g.id);
-                  e.dataTransfer.setData("text/plain", g.id);
-                  e.dataTransfer.setData("application/x-source", "bench");
-                }}
-                className="select-none cursor-grab active:cursor-grabbing px-3 py-1.5 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-100 text-sm shadow-sm"
-                title={`Drag ${g.name || g.id} onto a seat or a queue`}
-                data-guard-id={g.id}
-              >
-                <span className="font-medium">{g.name || g.id}</span>
-              </li>
-            ))}
+            {guards.map((g) => {
+              const off = g._onShift === false;
+              return (
+                <li
+                  key={g.id}
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("application/x-guard-id", g.id);
+                    e.dataTransfer.setData("text/plain", g.id);
+                    e.dataTransfer.setData("application/x-source", "bench");
+                  }}
+                  className={[
+                    "select-none cursor-grab active:cursor-grabbing px-3 py-1.5 rounded-lg border text-sm shadow-sm",
+                    off
+                      ? "bg-slate-800/50 border-slate-700 text-slate-400"
+                      : "bg-slate-800/80 border-slate-700 text-slate-100",
+                  ].join(" ")}
+                  title={
+                    off
+                      ? `${g.name || g.id} is currently OFF shift`
+                      : `Drag ${g.name || g.id} onto a seat or a queue`
+                  }
+                  data-guard-id={g.id}
+                >
+                  <span className="font-medium">{g.name || g.id}</span>
+                  <span
+                    className={[
+                      "ml-2 text-[10px] px-1.5 py-0.5 rounded-md border",
+                      off
+                        ? "bg-slate-700/50 text-slate-300 border-slate-600"
+                        : "bg-green-600/20 text-green-300 border-green-600/60",
+                    ].join(" ")}
+                  >
+                    {off ? "off-shift" : "on-shift"}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>

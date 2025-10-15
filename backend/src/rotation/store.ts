@@ -3,17 +3,38 @@ import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { rotationKey } from "./rotationKey";
 
+// ---- Shared types ----
 export type Assigned = Record<string, string | null>;
 export type QueueEntry = { guardId: string; returnTo: string; enteredTick: number };
+
+export type ShiftType = "FIRST" | "SECOND" | "FULL" | "CUSTOM";
+export type ShiftInfo = { shiftType: ShiftType; startISO?: string; endISO?: string };
+
 export type RotationState = {
   assigned: Assigned;
   queue: QueueEntry[];
   breaks?: Record<string, string>;
   conflicts?: Array<{ stationId: string; guardId: string; reason: string }>;
-  rev: number;
-  tick: number;
   updatedAt?: Record<string, string>; // per seat (ISO)
-  ttl?: number; // ONLY on sandbox items
+  tick: number;
+  rev: number;
+
+  // NEW: per-guard shift roster (guardId -> shift info)
+  roster?: Record<string, ShiftInfo>;
+
+  // Optional TTL for sandbox instances (epoch seconds)
+  ttl?: number;
+};
+
+const EMPTY_STATE: RotationState = {
+  assigned: {},
+  queue: [],
+  breaks: {},
+  conflicts: [],
+  updatedAt: {},
+  tick: 0,
+  rev: 0,
+  roster: {},
 };
 
 export async function getState(
@@ -22,17 +43,26 @@ export async function getState(
   date: string,
   instanceId?: string
 ): Promise<RotationState> {
-  const { Item } = await ddb.send(new GetCommand({
-    TableName: table,
-    Key: rotationKey(date, instanceId),
-    ConsistentRead: true,
-  }));
-  return (Item as RotationState) ?? {
-    assigned: {},
-    queue: [],
-    rev: 0,
-    tick: 0,
-    updatedAt: {},
+  const { Item } = await ddb.send(
+    new GetCommand({
+      TableName: table,
+      Key: rotationKey(date, instanceId),
+      ConsistentRead: true,
+    })
+  );
+  // Merge defaults to guarantee presence of required fields
+  const it = (Item as RotationState) ?? {};
+  return {
+    ...EMPTY_STATE,
+    ...it,
+    assigned: it?.assigned ?? {},
+    queue: it?.queue ?? [],
+    breaks: it?.breaks ?? {},
+    conflicts: it?.conflicts ?? [],
+    updatedAt: it?.updatedAt ?? {},
+    roster: it?.roster ?? {},
+    tick: typeof it?.tick === "number" ? it.tick : 0,
+    rev: typeof it?.rev === "number" ? it.rev : 0,
   };
 }
 
@@ -44,9 +74,10 @@ export async function putState(
   next: RotationState,
   opts?: { ttlSeconds?: number; expectedRev?: number | null } // set expectedRev to enable optimistic write
 ) {
-  const ttl = instanceId && opts?.ttlSeconds
-    ? Math.floor(Date.now() / 1000) + opts.ttlSeconds
-    : undefined;
+  const ttl =
+    instanceId && opts?.ttlSeconds
+      ? Math.floor(Date.now() / 1000) + opts.ttlSeconds
+      : undefined;
 
   const names: Record<string, string> = {
     "#assigned": "assigned",
@@ -56,6 +87,7 @@ export async function putState(
     "#rev": "rev",
     "#tick": "tick",
     "#updatedAt": "updatedAt",
+    "#roster": "roster",
   };
   if (ttl) names["#ttl"] = "ttl";
 
@@ -67,6 +99,7 @@ export async function putState(
     "#rev = :r",
     "#tick = :t",
     "#updatedAt = :u",
+    "#roster = :ro",
     ...(ttl ? ["#ttl = :ttl"] : []),
   ].join(", ");
 
@@ -78,6 +111,7 @@ export async function putState(
     ":r": typeof next.rev === "number" ? next.rev : 0,
     ":t": typeof next.tick === "number" ? next.tick : 0,
     ":u": next.updatedAt ?? {},
+    ":ro": next.roster ?? {},
   };
   if (ttl) values[":ttl"] = ttl;
 

@@ -1,19 +1,22 @@
-
 // src/routes/plan.ts
 console.log("[routes/plan] LOADED");
 
 import { Router } from "express";
-import {
-  ScanCommand,
-} from "@aws-sdk/lib-dynamodb";
+import { ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb, TABLE } from "../db.js";
 import { computeNext } from "../engine/rotation.js";
 import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
 // 🔑 per-instance state helpers
-import { getState, putState, type RotationState } from "../rotation/store";
+import { getState, putState, type RotationState, type ShiftInfo, type ShiftType } from "../rotation/store";
 import { rotationKey } from "../rotation/rotationKey";
 import crypto from "node:crypto";
+
+// ===== Shift types/local extension =====
+
+type RotationStateWithRoster = RotationState & {
+  roster?: Record<string, ShiftInfo>;
+};
 
 // env
 const SANDBOX_TTL_SECS = Number(process.env.SANDBOX_TTL_DAYS || 7) * 24 * 3600;
@@ -21,7 +24,7 @@ const SANDBOX_TTL_SECS = Number(process.env.SANDBOX_TTL_DAYS || 7) * 24 * 3600;
 const router = Router();
 router.get("/_ping", (_req, res) => res.json({ ok: true, router: "plan" }));
 router.get("/_build", (_req, res) => {
-  const BUILD_TAG = "plan-autopopulate@2025-10-14-c";
+  const BUILD_TAG = "plan-autopopulate@2025-10-15-a";
   res.setHeader("x-build", BUILD_TAG);
   res.json({ ok: true, build: BUILD_TAG, t: Date.now() });
 });
@@ -99,7 +102,7 @@ type QueueRow = { guardId: string; returnTo: string; enteredTick: number };
 
 /** Helpers that now read/write the single per-instance STATE row **/
 async function readAssigned(req: any, date: string): Promise<Record<string, string | null>> {
-  const state = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const state = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationState;
   const assigned: Record<string, string | null> = Object.fromEntries(
     POSITIONS.map((p) => [p.id, null as string | null])
   );
@@ -107,13 +110,41 @@ async function readAssigned(req: any, date: string): Promise<Record<string, stri
   return assigned;
 }
 async function readQueue(req: any, date: string): Promise<QueueRow[]> {
-  const state = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
-  return Array.isArray(state.queue) ? state.queue.map(q => ({
-    guardId: String(q.guardId),
-    returnTo: String(q.returnTo),
-    enteredTick: Number.isFinite(q.enteredTick) ? Math.trunc(q.enteredTick) : 0,
-  })) : [];
+  const state = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationState;
+  return Array.isArray(state.queue)
+    ? state.queue.map((q) => ({
+        guardId: String(q.guardId),
+        returnTo: String(q.returnTo),
+        enteredTick: Number.isFinite(q.enteredTick) ? Math.trunc(q.enteredTick) : 0,
+      }))
+    : [];
 }
+
+// --- Shift helpers ---
+function isOnShift(nowISO: string, s?: ShiftInfo | null): boolean {
+  if (!s) return false;
+  if (s.shiftType === "CUSTOM") {
+    if (!s.startISO || !s.endISO) return false;
+    const now = new Date(nowISO);
+    return now >= new Date(s.startISO) && now < new Date(s.endISO);
+  }
+  if (s.startISO && s.endISO) {
+    const now = new Date(nowISO);
+    return now >= new Date(s.startISO) && now < new Date(s.endISO);
+  }
+  // Fallback hours
+  const day = new Date(nowISO);
+  const open = new Date(day); open.setHours(9, 0, 0, 0);
+  const mid  = new Date(day); mid.setHours(13, 0, 0, 0);
+  const close= new Date(day); close.setHours(17, 0, 0, 0);
+  switch (s.shiftType) {
+    case "FULL":   return day >= open && day < close;
+    case "FIRST":  return day >= open && day < mid;
+    case "SECOND": return day >= mid && day < close;
+    default:       return false;
+  }
+}
+
 
 // ============================================================================
 // POST /api/plan/rotate  (per-instance)
@@ -124,7 +155,7 @@ router.post("/rotate", async (req: any, res) => {
 
   const { guards, knownIds, byName } = await loadGuardMaps();
 
-  // normalize incoming client snapshot vs server snapshot
+  // --- Normalize incoming client snapshot vs server snapshot
   const dbAssigned = await readAssigned(req, date);
 
   const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<
@@ -142,17 +173,58 @@ router.post("/rotate", async (req: any, res) => {
   const assigned =
     countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
 
+  // --- Timing
   const nowISO =
     typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const currentTick = tickIndexFromISO(nowISO);
 
+  // --- Roster filter (shift windows)
+  const stateForRoster = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
+  const roster: Record<string, ShiftInfo> = stateForRoster.roster || {};
+
+  const onShiftSet = new Set(
+    Object.keys(roster).filter((gid) => isOnShift(nowISO, roster[gid]))
+  );
+  // If roster is empty, treat as "everyone on-shift" for backward-compat
+  const rosterActive = onShiftSet.size > 0 ? onShiftSet : new Set(guards.map((g) => g.id));
+
+  // Client may pass allowedIds; intersect with on-shift
+  const clientAllowed = Array.isArray(req.body?.allowedIds)
+    ? (req.body.allowedIds as string[])
+    : guards.map((g) => g.id);
+
+  const finalAllowed = clientAllowed.filter((gid) => rosterActive.has(gid));
+  const finalAllowedSet = new Set(finalAllowed);
+
+  // Filter guards list passed into engine so off-shift guards are never considered
+  const guardsOnShift = guards.filter((g) => finalAllowedSet.has(g.id));
+
+  // --- Queue
   const queue = await readQueue(req, date);
 
-  // Compute next using your engine
-  const out = computeNext({ assigned, guards, breaks: {}, queue, nowISO });
+  // --- Compute next using your engine (only with on-shift guards)
+  const out = computeNext({ assigned, guards: guardsOnShift, breaks: {}, queue, nowISO });
 
-  // Build next per-instance state
-  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  // --- Safety scrub: in case engine preserved an off-shift seated guard, null them out
+  for (const [seat, gid] of Object.entries(out.nextAssigned || {})) {
+    if (gid && !finalAllowedSet.has(gid)) {
+      out.nextAssigned[seat] = null;
+    }
+  }
+
+  // --- Persist next per-instance state
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
+
   const next: RotationState = {
     ...current,
     assigned: out.nextAssigned,
@@ -169,15 +241,14 @@ router.post("/rotate", async (req: any, res) => {
     tick: (current.tick ?? 0) + 1,
     updatedAt: {
       ...(current.updatedAt || {}),
-      // optionally stamp each seat touched; here we just stamp the write time per seat
       ...Object.fromEntries(Object.keys(out.nextAssigned).map((sid) => [sid, nowISO])),
     },
     rev: (current.rev ?? 0) + 1,
   };
 
-  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+  const saved = (await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
     ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
-  });
+  })) as RotationState;
 
   res.json({
     assigned: saved.assigned,
@@ -187,7 +258,6 @@ router.post("/rotate", async (req: any, res) => {
     nowISO,
   });
 });
-
 // ============================================================================
 // GET /api/plan/queue  (per-instance)
 // ============================================================================
@@ -230,7 +300,12 @@ router.post("/queue-add", async (req: any, res) => {
   const currentTick = tickIndexFromISO(nowISO);
 
   // load & append if not exists
-  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
   const existing = Array.isArray(current.queue) ? current.queue : [];
   if (existing.some((e) => e.guardId === guardId)) {
     return res.json({ ok: true, queue: existing });
@@ -242,9 +317,9 @@ router.post("/queue-add", async (req: any, res) => {
     rev: (current.rev ?? 0) + 1,
   };
 
-  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+  const saved = (await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
     ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
-  });
+  })) as RotationState;
 
   res.json({ ok: true, queue: saved.queue || [] });
 });
@@ -256,12 +331,17 @@ router.post("/queue-clear", async (req: any, res) => {
   const date = req.body?.date as string;
   if (!date) return res.status(400).json({ error: "date required" });
 
-  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
   const next: RotationState = { ...current, queue: [], rev: (current.rev ?? 0) + 1 };
 
-  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+  const saved = (await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
     ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
-  });
+  })) as RotationState;
 
   res.json({ ok: true, queue: saved.queue || [] });
 });
@@ -294,7 +374,12 @@ router.post("/queue-set", async (req: any, res) => {
   const assignedLatest = await readAssigned(req, date);
   const seated = new Set(Object.values(assignedLatest).filter((v): v is string => Boolean(v)));
 
-  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
   const existing = Array.isArray(current.queue) ? current.queue : [];
   const existingByGuard = new Map(existing.map((q) => [q.guardId, q.enteredTick]));
 
@@ -333,12 +418,13 @@ router.post("/queue-set", async (req: any, res) => {
     rev: (current.rev ?? 0) + 1,
   };
 
-  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+  const saved = (await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
     ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
-  });
+  })) as RotationState;
 
   res.json({ ok: true, queue: saved.queue || [] });
 });
+
 // String -> 32-bit seed
 function hashSeed(s: string): number {
   let h = 2166136261 >>> 0;
@@ -376,7 +462,6 @@ router.post("/autopopulate", async (req: any, res) => {
   const { guards, knownIds, byName } = await loadGuardMaps();
 
   const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
-  const time = nowISO.slice(11, 19);
   const currentTick = tickIndexFromISO(nowISO);
 
   // Allowed (on-duty set or everyone if missing)
@@ -386,9 +471,21 @@ router.post("/autopopulate", async (req: any, res) => {
   const allowedIds: string[] = rawAllowed
     .map((v) => toIdLoose(v, knownIds, byName))
     .filter(Boolean) as string[];
-const seedBuf = crypto.randomBytes(4);
-const seed = seedBuf.readUInt32LE(0);
-const rnd = mulberry32(seed);
+
+  // Roster filter
+  const stateForRoster = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationStateWithRoster;
+  const roster: Record<string, ShiftInfo> = stateForRoster.roster || {};
+  const onShiftSet = new Set(Object.keys(roster).filter((gid) => isOnShift(nowISO, roster[gid])));
+  const rosterActive = onShiftSet.size > 0 ? onShiftSet : null;
+  const allowedFiltered = rosterActive
+    ? allowedIds.filter((gid) => rosterActive.has(gid))
+    : allowedIds;
+
   // Seats: client snapshot wins if provided; fallback to server
   const serverAssigned = await readAssigned(req, date);
   const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<
@@ -396,12 +493,13 @@ const rnd = mulberry32(seed);
     string | null | undefined
   >;
   const force = Boolean(req.body?.force);
-const seatsSnapshot: Record<string, string | null> = {};
-for (const p of POSITIONS) {
-  const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);
-  const base = serverAssigned[p.id] ?? null;
-  seatsSnapshot[p.id] = force ? null : (clientVal != null ? clientVal : base);
-}
+
+  const seatsSnapshot: Record<string, string | null> = {};
+  for (const p of POSITIONS) {
+    const clientVal = toIdLoose(rawClient[p.id], knownIds, byName);
+    const base = serverAssigned[p.id] ?? null;
+    seatsSnapshot[p.id] = force ? null : clientVal != null ? clientVal : base;
+  }
 
   // Existing queue
   const existingQueue = await readQueue(req, date);
@@ -429,12 +527,16 @@ for (const p of POSITIONS) {
     return age;
   };
 
+  const seedBuf = crypto.randomBytes(4);
+  const seed = seedBuf.readUInt32LE(0);
+  const rnd = mulberry32(seed);
+
   const nameById = new Map(guards.map((g) => [g.id, g.name || g.id]));
   const nm = (id?: string | null) => (id ? nameById.get(id) || id : "(none)");
 
   const seatedSet = new Set(Object.values(seatsSnapshot).filter((v): v is string => Boolean(v)));
   const queuedSet = new Set(existingQueue.map((q) => q.guardId));
-  const pool = allowedIds.filter((id) => !seatedSet.has(id) && !queuedSet.has(id));
+  const pool = allowedFiltered.filter((id) => !seatedSet.has(id) && !queuedSet.has(id));
 
   const minors: string[] = [];
   const adults: string[] = [];
@@ -444,26 +546,26 @@ for (const p of POSITIONS) {
     if (age !== null && age <= 15) minors.push(id);
     else adults.push(id);
   }
-shuffleInPlace(minors, rnd);
-shuffleInPlace(adults, rnd);
-console.log("[auto] seed=", seed, "minors sample=", minors.slice(0,3), "adults sample=", adults.slice(0,3));
-console.log("[auto] seated count=", seatedSet.size, "queued count=", queuedSet.size);
+  shuffleInPlace(minors, rnd);
+  shuffleInPlace(adults, rnd);
+  console.log("[auto] seed=", seed, "minors sample=", minors.slice(0, 3), "adults sample=", adults.slice(0, 3));
+  console.log("[auto] seated count=", seatedSet.size, "queued count=", queuedSet.size);
 
   const takeRandom = (arr: string[]) =>
-  arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null;
+    arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null;
 
-const takeAdult = () => takeRandom(adults);
-const takeMinor = () => takeRandom(minors);
+  const takeAdult = () => takeRandom(adults);
+  const takeMinor = () => takeRandom(minors);
 
-const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } => {
-  if (pref === "adult") {
-    const a = takeAdult();
-    return { id: a, tag: a ? "A" : "none" };
-  } else {
-    const m = takeMinor();
-    return { id: m, tag: m ? "M" : "none" };
-  }
-};
+  const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } => {
+    if (pref === "adult") {
+      const a = takeAdult();
+      return { id: a, tag: a ? "A" : "none" };
+    } else {
+      const m = takeMinor();
+      return { id: m, tag: m ? "M" : "none" };
+    }
+  };
 
   // Per-section fill (entry -> middle -> rest -> tail)
   for (const s of sectionIds) {
@@ -474,7 +576,11 @@ const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string }
     const middle = order.length >= 3 ? order[1] : order[order.length - 1];
     const rest = restSeatBySection[s];
 
-    const seatWithPref = (seatId: string | null | undefined, pref: "adult" | "minor", label: string) => {
+    const seatWithPref = (
+      seatId: string | null | undefined,
+      pref: "adult" | "minor",
+      label: string
+    ) => {
       if (!seatId) return;
       if (seatsSnapshot[seatId]) return;
       const pick = takePrefer(pref);
@@ -543,12 +649,17 @@ const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string }
   const nextQueue = existingQueue.concat(appended);
 
   // Persist single STATE row
-  const current = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
   const next: RotationState = {
     ...current,
     assigned: seatsSnapshot,
     queue: nextQueue,
-    breaks: {}, // you can wire real breaks here later
+    breaks: {},
     conflicts: [],
     tick: (current.tick ?? 0) + 1,
     updatedAt: {
@@ -558,37 +669,77 @@ const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string }
     rev: (current.rev ?? 0) + 1,
   };
 
-  const saved = await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
+  const saved = (await putState(ddb as any, TABLE, date, req.sandboxInstanceId, next, {
     ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined,
-  });
+  })) as RotationState;
 
   const queuesBySection = Object.fromEntries(
     sectionIds.map((s) => [s, (saved.queue || []).filter((q) => q.returnTo === s)])
   );
-const BUILD_TAG = "plan-autopopulate@2025-10-14-c"; // bump each deploy
+  const BUILD_TAG = "plan-autopopulate@2025-10-15-a";
 
-const debug = {
-  build: BUILD_TAG,
-  seed,
-  first3AssignedFromSeatsSnapshot: Object.values(seatsSnapshot).filter(Boolean).slice(0, 3),
-  minorsCount: minors.length,
-  adultsCount: adults.length,
-};
-res.setHeader("x-build", BUILD_TAG);
-res.json({
-  assigned: saved.assigned,
-  breaks: saved.breaks || {},
-  conflicts: saved.conflicts || [],
-  meta: {
-    period: "ALL_AGES",
-    breakQueue: saved.queue || [],
-    queuesBySection,
-    debug: { build: BUILD_TAG, rand: Math.random() }, // <--- MUST be present in the live response
-  },
-  nowISO,
-});
+  res.setHeader("x-build", BUILD_TAG);
+  res.json({
+    assigned: saved.assigned,
+    breaks: saved.breaks || {},
+    conflicts: saved.conflicts || [],
+    meta: {
+      period: "ALL_AGES",
+      breakQueue: saved.queue || [],
+      queuesBySection,
+      debug: { build: BUILD_TAG, rand: Math.random() },
+    },
+    nowISO,
+  });
 });
 
+// ========== ROSTER API ==========
+// GET /api/plan/roster?date=YYYY-MM-DD
+router.get("/roster", async (req: any, res) => {
+  const date = String(req.query?.date || "");
+  if (!date) return res.status(400).json({ error: "date required" });
+  const state = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationStateWithRoster;
+  res.json({ roster: state.roster || {} });
+});
 
+// POST /api/plan/roster-upsert
+// body: { date, guardId, shiftType, startISO?, endISO? }
+router.post("/roster-upsert", async (req: any, res) => {
+  const date = String(req.body?.date || "");
+  const guardId = String(req.body?.guardId || "");
+  const shiftType = String(req.body?.shiftType || "") as ShiftType;
+  const startISO = req.body?.startISO ? String(req.body.startISO) : undefined;
+  const endISO = req.body?.endISO ? String(req.body.endISO) : undefined;
+  if (!date || !guardId || !shiftType)
+    return res.status(400).json({ error: "date, guardId, shiftType required" });
+if (!["FIRST", "SECOND", "FULL", "CUSTOM"].includes(shiftType)) {
+  return res.status(400).json({ error: "invalid shiftType" });
+}
+
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationStateWithRoster;
+  const roster = { ...(current.roster || {}) } as Record<string, ShiftInfo>;
+  roster[guardId] = { shiftType, startISO, endISO };
+
+  const saved = (await putState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId,
+    { ...(current as RotationState), roster, rev: (current.rev ?? 0) + 1 } as any, // 'as any' keeps build green if RotationState isn't extended
+    { ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined }
+  )) as RotationStateWithRoster;
+
+  res.json({ ok: true, roster: saved.roster || {} });
+});
 
 export default router;
