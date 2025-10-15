@@ -207,7 +207,21 @@ export default function Home() {
 
 useEffect(() => {
   if (!guardsLoaded) return;
-  setOnDutyIds(prev => (prev.size > 0 ? prev : new Set(guards.map(g => g.id))));
+
+  // ✅ Default to all guards on-duty
+  setOnDutyIds(prev => {
+    if (prev.size > 0) return prev; // don't overwrite saved set
+    return new Set(guards.map(g => g.id));
+  });
+
+  // ✅ Default each guard's shiftType to FULL in roster if none
+  setRoster(prev => {
+    const next = { ...prev };
+    for (const g of guards) {
+      if (!next[g.id]) next[g.id] = { shiftType: "FULL" };
+    }
+    return next;
+  });
 }, [guardsLoaded, guards]);
 
   // --- Derived ---

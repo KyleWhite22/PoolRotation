@@ -682,22 +682,14 @@ router.get("/roster", async (req: any, res) => {
 router.post("/roster-upsert", async (req: any, res) => {
   const date = String(req.body?.date || "");
   const guardId = String(req.body?.guardId || "");
-  const shiftType = String(req.body?.shiftType || "") as ShiftType;
+  const shiftType = (req.body?.shiftType as ShiftType) || "FULL"; // ✅ default FULL
   const startISO = req.body?.startISO ? String(req.body.startISO) : undefined;
   const endISO = req.body?.endISO ? String(req.body.endISO) : undefined;
-  if (!date || !guardId || !shiftType)
-    return res.status(400).json({ error: "date, guardId, shiftType required" });
-if (!["FIRST", "SECOND", "FULL", "CUSTOM"].includes(shiftType)) {
-  return res.status(400).json({ error: "invalid shiftType" });
-}
+  if (!date || !guardId)
+    return res.status(400).json({ error: "date and guardId required" });
 
-  const current = (await getState(
-    ddb as any,
-    TABLE,
-    date,
-    req.sandboxInstanceId
-  )) as RotationStateWithRoster;
-  const roster = { ...(current.roster || {}) } as Record<string, ShiftInfo>;
+  const current = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationStateWithRoster;
+  const roster = { ...(current.roster || {}) };
   roster[guardId] = { shiftType, startISO, endISO };
 
   const saved = (await putState(
@@ -705,7 +697,7 @@ if (!["FIRST", "SECOND", "FULL", "CUSTOM"].includes(shiftType)) {
     TABLE,
     date,
     req.sandboxInstanceId,
-    { ...(current as RotationState), roster, rev: (current.rev ?? 0) + 1 } as any, // 'as any' keeps build green if RotationState isn't extended
+    { ...(current as RotationState), roster, rev: (current.rev ?? 0) + 1 } as any,
     { ttlSeconds: req.sandboxInstanceId ? SANDBOX_TTL_SECS : undefined }
   )) as RotationStateWithRoster;
 
