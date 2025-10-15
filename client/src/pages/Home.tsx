@@ -208,21 +208,15 @@ export default function Home() {
 useEffect(() => {
   if (!guardsLoaded) return;
 
-  // ✅ Default to all guards on-duty
-  setOnDutyIds(prev => {
-    if (prev.size > 0) return prev; // don't overwrite saved set
-    return new Set(guards.map(g => g.id));
-  });
-
-  // ✅ Default each guard's shiftType to FULL in roster if none
   setRoster(prev => {
     const next = { ...prev };
-    for (const g of guards) {
-      if (!next[g.id]) next[g.id] = { shiftType: "FULL" };
+    // only touch guards that are currently on-duty
+    for (const gid of onDutyIds) {
+      if (!next[gid]) next[gid] = { shiftType: "FULL" };
     }
     return next;
   });
-}, [guardsLoaded, guards]);
+}, [onDutyIds, guardsLoaded]);
 
   // --- Derived ---
   const usedGuardIds = useMemo(
@@ -579,11 +573,11 @@ const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean =>
     if (seatedSet.has(gid)) return;
 
     // Frontend guard: must be on-duty AND on-shift now
-    const onShiftNow = isOnShift(simulatedNow.toISOString(), roster[gid]);
-    if (!onDutyIds.has(gid) || !onShiftNow) {
-      alert("Only on-duty guards who are currently on shift can be seated.");
-      return;
-    }
+   const onShiftNow = isOnShift(simulatedNow.toISOString(), roster[gid] ?? { shiftType: "FULL" });
+if (!onDutyIds.has(gid) || !onShiftNow) {
+  alert("Only on-duty guards who are currently on shift can be seated.");
+  return;
+}
 
     setAssigned((prev) => ({ ...prev, [positionId]: gid } as Assigned));
     try {
