@@ -164,7 +164,6 @@ function isOnShift(nowISO: string, s?: ShiftInfo | null): boolean {
     default:       return false;
   }
 }
-
 // ============================================================================
 // POST /api/plan/rotate  (per-instance)
 // ============================================================================
@@ -174,48 +173,97 @@ router.post("/rotate", async (req: any, res) => {
 
   const { guards, knownIds, byName } = await loadGuardMaps();
 
-  // Normalize incoming client snapshot vs server snapshot
+  // --- Normalize incoming client snapshot vs server snapshot
   const dbAssigned = await readAssigned(req, date);
-  const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null | undefined>;
+
+  const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<
+    string,
+    string | null | undefined
+  >;
   const clientAssigned: Record<string, string | null> = {};
-  for (const p of POSITIONS) clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName);
+  for (const p of POSITIONS) {
+    clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName);
+  }
 
   const countNonNull = (m: Record<string, string | null>) =>
     Object.values(m).reduce((n, v) => n + (v ? 1 : 0), 0);
-  const assigned = countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
 
-  // Timing
-  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  const assigned =
+    countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
+
+  // --- Timing
+  const nowISO =
+    typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const currentTick = tickIndexFromISO(nowISO);
 
-  // Roster filter (default missing to FULL)
+  // --- Roster filter (default anyone missing to FULL)
   const stateForRoster = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
   const roster = (stateForRoster.roster || {}) as Record<string, ShiftInfo>;
+
   const rosterActive = new Set(
-    guards.map((g) => g.id).filter((gid) => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
+    guards
+      .map((g) => g.id)
+      .filter((gid) => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
   );
 
-  // allowedIds ∩ rosterActive (or everyone if none provided)
-  const clientAllowed = Array.isArray(req.body?.allowedIds) ? (req.body.allowedIds as string[]) : guards.map((g) => g.id);
+  // --- allowedIds ∩ rosterActive (or everyone if none provided)
+  const clientAllowed = Array.isArray(req.body?.allowedIds)
+    ? (req.body.allowedIds as string[])
+    : guards.map((g) => g.id);
+
   const finalAllowed = clientAllowed.filter((gid) => rosterActive.has(gid));
   const finalAllowedSet = new Set(finalAllowed);
 
-  // Pass only on-shift guards to engine
+  // --- Pass only on-shift (and on-duty) guards to engine
   const guardsOnShift = guards.filter((g) => finalAllowedSet.has(g.id));
 
-  // Queue
+  // --- Queue
   const queue = await readQueue(req, date);
 
-  // Compute next
+  // --- Compute next using engine
   const out = computeNext({ assigned, guards: guardsOnShift, breaks: {}, queue, nowISO });
 
-  // Scrub any off-shift seats (e.g., FIRST after 4pm)
+  // --- Safety scrub: ensure no off-shift guard remains seated (e.g., FIRST after 4pm)
   for (const [seat, gid] of Object.entries(out.nextAssigned || {})) {
-    if (gid && !finalAllowedSet.has(gid)) out.nextAssigned[seat] = null;
+    if (gid && !finalAllowedSet.has(gid)) {
+      out.nextAssigned[seat] = null;
+    }
   }
 
-  // Persist next state
-  const current = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationState;
+  // --- NEW: Backfill empty seats from the on-duty + on-shift pool.
+  // This is what brings SECOND shift guards into seats right at 4pm.
+  {
+    const seatedAfter = new Set(
+      Object.values(out.nextAssigned || {}).filter((v): v is string => Boolean(v))
+    );
+    const queuedIds = new Set(queue.map((q) => q.guardId));
+
+    // pool = on-duty ∧ on-shift ∧ not seated ∧ not queued
+    const pool: string[] = guardsOnShift
+      .map((g) => g.id)
+      .filter((id) => finalAllowedSet.has(id) && !seatedAfter.has(id) && !queuedIds.has(id));
+
+    // Fill any null seats in position order
+    for (const p of POSITIONS) {
+      const seatId = p.id;
+      if (!out.nextAssigned[seatId]) {
+        const nextId = pool.shift();
+        if (nextId) {
+          out.nextAssigned[seatId] = nextId;
+          seatedAfter.add(nextId);
+        }
+      }
+    }
+  }
+
+  // --- Persist next per-instance state
+  const current = (await getState(
+    ddb as any,
+    TABLE,
+    date,
+    req.sandboxInstanceId
+  )) as RotationState;
+
   const next: RotationState = {
     ...current,
     assigned: out.nextAssigned,
@@ -249,6 +297,8 @@ router.post("/rotate", async (req: any, res) => {
     nowISO,
   });
 });
+
+
 
 // ============================================================================
 // GET /api/plan/queue  (per-instance)

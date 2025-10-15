@@ -840,23 +840,13 @@ if (!onDutyIds.has(gid) || !onShiftNow) {
       const data = await res.json();
 
       // merge assigned: only seats the server mentions
-      if (data?.assigned) {
-        const updates: Partial<Assigned> = {};
-        const inp = data.assigned;
-
-        if (Array.isArray(inp)) {
-          for (const it of inp) {
-            const seat = String(it?.seat ?? "");
-            if (!seat) continue;
-            updates[seat] = toId(it?.guard);
-          }
-        } else if (inp && typeof inp === "object") {
-          for (const [seat, raw] of Object.entries(inp)) {
-            updates[seat] = toId(raw);
-          }
-        }
-        setAssigned((prev) => ({ ...prev, ...updates } as Assigned));
-      }
+      if (data?.assigned && typeof data.assigned === "object") {
+  const next: Assigned = emptyAssigned();
+  for (const [seat, raw] of Object.entries(data.assigned)) {
+    next[seat] = toId(raw);
+  }
+  setAssigned(next);
+}
 
       if (data?.breaks) setBreaks(data.breaks);
       if (Array.isArray(data?.conflicts)) setConflicts(data.conflicts);
