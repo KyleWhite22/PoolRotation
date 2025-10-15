@@ -123,19 +123,6 @@ async function readQueue(req: any, date: string): Promise<QueueRow[]> {
 // --- Shift helpers: TZ-aware (America/New_York) and 12–4 / 4–8 / 12–8 windows ---
 const POOL_TZ = "America/New_York";
 
-function minutesInTZ(iso: string, tz: string): number {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const parts = dtf.formatToParts(new Date(iso));
-  const hh = Number(parts.find(p => p.type === "hour")?.value ?? "0");
-  const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
-  return hh * 60 + mm; // minutes since local midnight in tz
-}
-
 type ShiftType = "FIRST" | "SECOND" | "FULL" | "CUSTOM";
 type ShiftInfo = { shiftType: ShiftType; startISO?: string; endISO?: string };
 // Sim-clock helpers (America/New_York)
