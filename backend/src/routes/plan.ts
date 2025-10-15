@@ -8,7 +8,7 @@ import { computeNext } from "../engine/rotation.js";
 import { POSITIONS, REST_BY_SECTION } from "../data/poolLayout.js";
 
 // 🔑 per-instance state helpers
-import { getState, putState, type RotationState, type ShiftInfo, type ShiftType } from "../rotation/store";
+import { getState, putState, type RotationState, } from "../rotation/store";
 import { rotationKey } from "../rotation/rotationKey";
 import crypto from "node:crypto";
 
@@ -120,31 +120,50 @@ async function readQueue(req: any, date: string): Promise<QueueRow[]> {
     : [];
 }
 
-// --- Shift helpers ---
+// --- Shift helpers: TZ-aware (America/New_York) and 12–4 / 4–8 / 12–8 windows ---
+const POOL_TZ = "America/New_York";
+
+function minutesInTZ(iso: string, tz: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const parts = dtf.formatToParts(new Date(iso));
+  const hh = Number(parts.find(p => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
+  return hh * 60 + mm; // minutes since local midnight in tz
+}
+
+type ShiftType = "FIRST" | "SECOND" | "FULL" | "CUSTOM";
+type ShiftInfo = { shiftType: ShiftType; startISO?: string; endISO?: string };
+
 function isOnShift(nowISO: string, s?: ShiftInfo | null): boolean {
   if (!s) return false;
-  if (s.shiftType === "CUSTOM") {
-    if (!s.startISO || !s.endISO) return false;
+
+  // CUSTOM uses absolute window if both ends present
+  if (s.shiftType === "CUSTOM" && s.startISO && s.endISO) {
     const now = new Date(nowISO);
     return now >= new Date(s.startISO) && now < new Date(s.endISO);
   }
-  if (s.startISO && s.endISO) {
-    const now = new Date(nowISO);
-    return now >= new Date(s.startISO) && now < new Date(s.endISO);
-  }
-  // Fallback hours
-  const day = new Date(nowISO);
-  const open = new Date(day); open.setHours(12, 0, 0, 0);
-  const mid  = new Date(day); mid.setHours(16, 0, 0, 0);
-  const close= new Date(day); close.setHours(20, 0, 0, 0);
+
+  // Compare in pool local time
+  const m = minutesInTZ(nowISO, POOL_TZ);
+  const FIRST_START = 12 * 60; // 12:00
+  const FIRST_END   = 16 * 60; // 16:00
+  const SECOND_START= 16 * 60; // 16:00
+  const SECOND_END  = 20 * 60; // 20:00
+  const FULL_START  = FIRST_START;
+  const FULL_END    = SECOND_END;
+
   switch (s.shiftType) {
-    case "FULL":   return day >= open && day < close;
-    case "FIRST":  return day >= open && day < mid;
-    case "SECOND": return day >= mid && day < close;
+    case "FIRST":  return m >= FIRST_START  && m < FIRST_END;
+    case "SECOND": return m >= SECOND_START && m < SECOND_END;
+    case "FULL":   return m >= FULL_START   && m < FULL_END;
     default:       return false;
   }
 }
-
 
 // ============================================================================
 // POST /api/plan/rotate  (per-instance)
@@ -155,78 +174,48 @@ router.post("/rotate", async (req: any, res) => {
 
   const { guards, knownIds, byName } = await loadGuardMaps();
 
-  // --- Normalize incoming client snapshot vs server snapshot
+  // Normalize incoming client snapshot vs server snapshot
   const dbAssigned = await readAssigned(req, date);
-
-  const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<
-    string,
-    string | null | undefined
-  >;
+  const clientAssignedRaw = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null | undefined>;
   const clientAssigned: Record<string, string | null> = {};
-  for (const p of POSITIONS) {
-    clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName);
-  }
+  for (const p of POSITIONS) clientAssigned[p.id] = toIdLoose(clientAssignedRaw[p.id], knownIds, byName);
 
   const countNonNull = (m: Record<string, string | null>) =>
     Object.values(m).reduce((n, v) => n + (v ? 1 : 0), 0);
+  const assigned = countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
 
-  const assigned =
-    countNonNull(dbAssigned) >= countNonNull(clientAssigned) ? dbAssigned : clientAssigned;
-
-  // --- Timing
-  const nowISO =
-    typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
+  // Timing
+  const nowISO = typeof req.body?.nowISO === "string" ? req.body.nowISO : new Date().toISOString();
   const currentTick = tickIndexFromISO(nowISO);
 
-  // --- Roster filter (shift windows)
-  const stateForRoster = (await getState(
-    ddb as any,
-    TABLE,
-    date,
-    req.sandboxInstanceId
-  )) as RotationState;
-  const roster: Record<string, ShiftInfo> = stateForRoster.roster || {};
+  // Roster filter (default missing to FULL)
+  const stateForRoster = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const roster = (stateForRoster.roster || {}) as Record<string, ShiftInfo>;
+  const rosterActive = new Set(
+    guards.map((g) => g.id).filter((gid) => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
+  );
 
-  const onShiftSet = new Set(
-  guards
-    .map(g => g.id)
-    .filter(gid => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
-);
-  // If roster is empty, treat as "everyone on-shift" for backward-compat
-const rosterActive = onShiftSet;
-
-  // Client may pass allowedIds; intersect with on-shift
-  const clientAllowed = Array.isArray(req.body?.allowedIds)
-    ? (req.body.allowedIds as string[])
-    : guards.map((g) => g.id);
-
+  // allowedIds ∩ rosterActive (or everyone if none provided)
+  const clientAllowed = Array.isArray(req.body?.allowedIds) ? (req.body.allowedIds as string[]) : guards.map((g) => g.id);
   const finalAllowed = clientAllowed.filter((gid) => rosterActive.has(gid));
   const finalAllowedSet = new Set(finalAllowed);
 
-  // Filter guards list passed into engine so off-shift guards are never considered
+  // Pass only on-shift guards to engine
   const guardsOnShift = guards.filter((g) => finalAllowedSet.has(g.id));
 
-  // --- Queue
+  // Queue
   const queue = await readQueue(req, date);
 
-  // --- Compute next using your engine (only with on-shift guards)
+  // Compute next
   const out = computeNext({ assigned, guards: guardsOnShift, breaks: {}, queue, nowISO });
 
-  // --- Safety scrub: in case engine preserved an off-shift seated guard, null them out
+  // Scrub any off-shift seats (e.g., FIRST after 4pm)
   for (const [seat, gid] of Object.entries(out.nextAssigned || {})) {
-    if (gid && !finalAllowedSet.has(gid)) {
-      out.nextAssigned[seat] = null;
-    }
+    if (gid && !finalAllowedSet.has(gid)) out.nextAssigned[seat] = null;
   }
 
-  // --- Persist next per-instance state
-  const current = (await getState(
-    ddb as any,
-    TABLE,
-    date,
-    req.sandboxInstanceId
-  )) as RotationState;
-
+  // Persist next state
+  const current = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationState;
   const next: RotationState = {
     ...current,
     assigned: out.nextAssigned,
@@ -260,6 +249,7 @@ const rosterActive = onShiftSet;
     nowISO,
   });
 });
+
 // ============================================================================
 // GET /api/plan/queue  (per-instance)
 // ============================================================================
@@ -453,9 +443,9 @@ function shuffleInPlace<T>(arr: T[], rnd: () => number) {
   }
 }
 
+
 // ============================================================================
 // POST /api/plan/autopopulate  (per-instance)
-//  fills seats; appends leftovers to queues; prefers adults/minors by seat
 // ============================================================================
 router.post("/autopopulate", async (req: any, res) => {
   const date = req.body?.date as string;
@@ -470,30 +460,25 @@ router.post("/autopopulate", async (req: any, res) => {
   const rawAllowed = Array.isArray(req.body?.allowedIds)
     ? (req.body.allowedIds as any[])
     : guards.map((g) => g.id);
-  const allowedIds: string[] = rawAllowed
+  const clientAllowed: string[] = rawAllowed
     .map((v) => toIdLoose(v, knownIds, byName))
     .filter(Boolean) as string[];
 
-  // Roster filter
-  const stateForRoster = (await getState(
-    ddb as any,
-    TABLE,
-    date,
-    req.sandboxInstanceId
-  )) as RotationStateWithRoster;
-  const roster: Record<string, ShiftInfo> = stateForRoster.roster || {};
-  const onShiftSet = new Set(Object.keys(roster).filter((gid) => isOnShift(nowISO, roster[gid])));
-  const rosterActive = onShiftSet.size > 0 ? onShiftSet : null;
-  const allowedFiltered = rosterActive
-    ? allowedIds.filter((gid) => rosterActive.has(gid))
-    : allowedIds;
+  // Roster filter (default missing to FULL)
+  const stateForRoster = await getState(ddb as any, TABLE, date, req.sandboxInstanceId);
+  const roster = (stateForRoster.roster || {}) as Record<string, ShiftInfo>;
+  const rosterActive = new Set(
+    guards.map((g) => g.id).filter((gid) => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
+  );
+
+  // Intersect allowedIds with rosterActive (or everyone if none provided)
+  const finalAllowed = (clientAllowed.length ? clientAllowed : guards.map((g) => g.id))
+    .filter((gid) => rosterActive.has(gid));
+  const finalAllowedSet = new Set(finalAllowed);
 
   // Seats: client snapshot wins if provided; fallback to server
   const serverAssigned = await readAssigned(req, date);
-  const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<
-    string,
-    string | null | undefined
-  >;
+  const rawClient = (req.body?.assignedSnapshot ?? {}) as Record<string, string | null | undefined>;
   const force = Boolean(req.body?.force);
 
   const seatsSnapshot: Record<string, string | null> = {};
@@ -502,13 +487,11 @@ router.post("/autopopulate", async (req: any, res) => {
     const base = serverAssigned[p.id] ?? null;
     seatsSnapshot[p.id] = force ? null : clientVal != null ? clientVal : base;
   }
-// After computing seatsSnapshot and allowedFiltered:
-const allowedSet = new Set(allowedFiltered);
-for (const [seat, gid] of Object.entries(seatsSnapshot)) {
-  if (gid && !allowedSet.has(gid)) {
-    seatsSnapshot[seat] = null; // don't keep off-shift in seats
+
+  // Scrub any off-shift occupants from the snapshot
+  for (const [seat, gid] of Object.entries(seatsSnapshot)) {
+    if (gid && !finalAllowedSet.has(gid)) seatsSnapshot[seat] = null;
   }
-}
 
   // Existing queue
   const existingQueue = await readQueue(req, date);
@@ -524,7 +507,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
   const restSeatBySection: Record<string, string | null> = {};
   for (const s of sectionIds) restSeatBySection[s] = (REST_BY_SECTION as any)?.[s] ?? null;
 
-  // Age split
+  // Age split (<=15 minor)
   const calcAge = (dob?: string | null): number | null => {
     if (!dob) return null;
     const d = new Date(dob);
@@ -536,8 +519,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
     return age;
   };
 
-  const seedBuf = crypto.randomBytes(4);
-  const seed = seedBuf.readUInt32LE(0);
+  const seed = crypto.randomBytes(4).readUInt32LE(0);
   const rnd = mulberry32(seed);
 
   const nameById = new Map(guards.map((g) => [g.id, g.name || g.id]));
@@ -545,7 +527,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
 
   const seatedSet = new Set(Object.values(seatsSnapshot).filter((v): v is string => Boolean(v)));
   const queuedSet = new Set(existingQueue.map((q) => q.guardId));
-  const pool = allowedFiltered.filter((id) => !seatedSet.has(id) && !queuedSet.has(id));
+  const pool = finalAllowed.filter((id) => !seatedSet.has(id) && !queuedSet.has(id));
 
   const minors: string[] = [];
   const adults: string[] = [];
@@ -560,21 +542,12 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
   console.log("[auto] seed=", seed, "minors sample=", minors.slice(0, 3), "adults sample=", adults.slice(0, 3));
   console.log("[auto] seated count=", seatedSet.size, "queued count=", queuedSet.size);
 
-  const takeRandom = (arr: string[]) =>
-    arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null;
-
+  const takeRandom = (arr: string[]) => (arr.length ? arr.splice(Math.floor(rnd() * arr.length), 1)[0] : null);
   const takeAdult = () => takeRandom(adults);
   const takeMinor = () => takeRandom(minors);
-
-  const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } => {
-    if (pref === "adult") {
-      const a = takeAdult();
-      return { id: a, tag: a ? "A" : "none" };
-    } else {
-      const m = takeMinor();
-      return { id: m, tag: m ? "M" : "none" };
-    }
-  };
+  const takePrefer = (pref: "adult" | "minor"): { id: string | null; tag: string } =>
+    pref === "adult" ? (() => { const a = takeAdult(); return { id: a, tag: a ? "A" : "none" }; })()
+                     : (() => { const m = takeMinor(); return { id: m, tag: m ? "M" : "none" }; })();
 
   // Per-section fill (entry -> middle -> rest -> tail)
   for (const s of sectionIds) {
@@ -585,11 +558,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
     const middle = order.length >= 3 ? order[1] : order[order.length - 1];
     const rest = restSeatBySection[s];
 
-    const seatWithPref = (
-      seatId: string | null | undefined,
-      pref: "adult" | "minor",
-      label: string
-    ) => {
+    const seatWithPref = (seatId: string | null | undefined, pref: "adult" | "minor", label: string) => {
       if (!seatId) return;
       if (seatsSnapshot[seatId]) return;
       const pick = takePrefer(pref);
@@ -634,15 +603,11 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
 
   let rr = currentTick % sectionIds.length;
   const pickSmallest = (): string => {
-    let best = sectionIds[rr],
-      bestCount = qCount.get(best) ?? 0;
+    let best = sectionIds[rr], bestCount = qCount.get(best) ?? 0;
     for (let k = 1; k < sectionIds.length; k++) {
       const s = sectionIds[(rr + k) % sectionIds.length];
       const c = qCount.get(s) ?? 0;
-      if (c < bestCount) {
-        best = s;
-        bestCount = c;
-      }
+      if (c < bestCount) { best = s; bestCount = c; }
     }
     rr = (rr + 1) % sectionIds.length;
     return best;
@@ -658,12 +623,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
   const nextQueue = existingQueue.concat(appended);
 
   // Persist single STATE row
-  const current = (await getState(
-    ddb as any,
-    TABLE,
-    date,
-    req.sandboxInstanceId
-  )) as RotationState;
+  const current = (await getState(ddb as any, TABLE, date, req.sandboxInstanceId)) as RotationState;
   const next: RotationState = {
     ...current,
     assigned: seatsSnapshot,
@@ -685,7 +645,7 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
   const queuesBySection = Object.fromEntries(
     sectionIds.map((s) => [s, (saved.queue || []).filter((q) => q.returnTo === s)])
   );
-  const BUILD_TAG = "plan-autopopulate@2025-10-15-a";
+  const BUILD_TAG = "plan-autopopulate@2025-10-15-b";
 
   res.setHeader("x-build", BUILD_TAG);
   res.json({
@@ -696,11 +656,12 @@ for (const [seat, gid] of Object.entries(seatsSnapshot)) {
       period: "ALL_AGES",
       breakQueue: saved.queue || [],
       queuesBySection,
-      debug: { build: BUILD_TAG, rand: Math.random() },
+      debug: { build: BUILD_TAG },
     },
     nowISO,
   });
 });
+
 
 // ========== ROSTER API ==========
 // GET /api/plan/roster?date=YYYY-MM-DD

@@ -205,13 +205,9 @@ export default function Home() {
     saveSnapshot(dayKey, snap);
   }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey, roster]);
 
- useEffect(() => {
+useEffect(() => {
   if (!guardsLoaded) return;
-  // if no saved on-duty selection, default to all guards
-  setOnDutyIds(prev => {
-    if (prev.size > 0) return prev;
-    return new Set(guards.map(g => g.id));
-  });
+  setOnDutyIds(prev => (prev.size > 0 ? prev : new Set(guards.map(g => g.id))));
 }, [guardsLoaded, guards]);
 
   // --- Derived ---
@@ -379,29 +375,36 @@ export default function Home() {
     return s;
   }, [breakQueue]);
 
-  // ---- Shift helpers (frontend mirror; FIRST 12–4, SECOND 4–8, FULL 12–8) ----
-  const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
-    if (!s) return false;
+const POOL_TZ = "America/New_York";
 
-    // If explicit custom window, respect it
-    if (s.shiftType === "CUSTOM" && s.startISO && s.endISO) {
-      const now = new Date(nowISO);
-      return now >= new Date(s.startISO) && now < new Date(s.endISO);
-    }
+const minutesInTZ = (iso: string) => {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: POOL_TZ, hour12: false, hour: "2-digit", minute: "2-digit"
+  });
+  const parts = dtf.formatToParts(new Date(iso));
+  const hh = Number(parts.find(p => p.type === "hour")?.value ?? "0");
+  const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
+  return hh * 60 + mm;
+};
 
-    const d = new Date(nowISO);
-    const firstStart = new Date(d); firstStart.setHours(12, 0, 0, 0);
-    const firstEnd   = new Date(d); firstEnd.setHours(16, 0, 0, 0);
-    const secondEnd  = new Date(d); secondEnd.setHours(20, 0, 0, 0);
+const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
+  if (!s) return false;
+  if (s.shiftType === "CUSTOM" && s.startISO && s.endISO) {
+    const now = new Date(nowISO);
+    return now >= new Date(s.startISO) && now < new Date(s.endISO);
+  }
+  const m = minutesInTZ(nowISO);
+  const FIRST_START = 12 * 60, FIRST_END = 16 * 60;
+  const SECOND_START= 16 * 60, SECOND_END= 20 * 60;
+  const FULL_START = FIRST_START, FULL_END = SECOND_END;
+  switch (s.shiftType) {
+    case "FIRST":  return m >= FIRST_START  && m < FIRST_END;
+    case "SECOND": return m >= SECOND_START && m < SECOND_END;
+    case "FULL":   return m >= FULL_START   && m < FULL_END;
+    default:       return false;
+  }
+}, []);
 
-    switch (s.shiftType) {
-      case "FIRST":  return d >= firstStart && d < firstEnd;
-      case "SECOND": return d >= firstEnd && d < secondEnd;
-      case "FULL":   return d >= firstStart && d < secondEnd; // full day = 12–8
-      case "CUSTOM": return false; // CUSTOM without both times => off
-      default:       return false;
-    }
-  }, []);
 
   // ✅ Auto-populate on-duty with everyone currently on-shift (only when empty)
   useEffect(() => {
@@ -419,24 +422,40 @@ export default function Home() {
 
   // on-duty but not seated/queued (tag off-shift)
   const onDutyUnassigned: (Guard & { _onShift: boolean })[] = useMemo(() => {
-    const onDuty = new Set(
-      [...onDutyIds]
-        .map((id) => toId(id))
-        .filter((id): id is string => Boolean(id && (knownIds.has(id) || isUuid(String(id)))))
-    );
-    const inUse = new Set<string>();
-    for (const gid of Object.values(assigned)) if (gid) inUse.add(gid);
-    for (const q of breakQueue ?? []) inUse.add(q.guardId);
-    for (const id of movingIds) {
-      const canon = toId(id);
-      if (canon) inUse.add(canon);
-    }
-    const nowISO = simulatedNow.toISOString();
-    return guards
-      .filter((g) => onDuty.has(g.id) && !inUse.has(g.id))
-      .map((g) => ({ ...g, _onShift: isOnShift(nowISO, roster[g.id]) }));
-  }, [guards, onDutyIds, assigned, breakQueue, movingIds, knownIds, toId, roster, simulatedNow, isOnShift]);
+  const onDuty = new Set(
+    [...onDutyIds]
+      .map((id) => toId(id))
+      .filter((id): id is string => Boolean(id && (knownIds.has(id) || isUuid(String(id)))))
+  );
 
+  const inUse = new Set<string>();
+  for (const gid of Object.values(assigned)) if (gid) inUse.add(gid);
+  for (const q of breakQueue ?? []) inUse.add(q.guardId);
+  for (const id of movingIds) {
+    const canon = toId(id);
+    if (canon) inUse.add(canon);
+  }
+
+  const nowISO = simulatedNow.toISOString();
+
+  return guards
+    .filter((g) => onDuty.has(g.id) && !inUse.has(g.id))
+    .map((g) => ({
+      ...g,
+      _onShift: isOnShift(nowISO, roster[g.id] ?? { shiftType: "FULL" }),
+    }));
+}, [
+  guards,
+  onDutyIds,
+  assigned,
+  breakQueue,
+  movingIds,
+  knownIds,
+  toId,
+  roster,
+  simulatedNow,
+  isOnShift,
+]);
   // ---------- Network helpers (queue) ----------
   const persistQueueFlat = async (flat: QueueEntry[]) => {
     const payload = flat.map((q) => ({
