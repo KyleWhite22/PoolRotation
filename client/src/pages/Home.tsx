@@ -383,17 +383,7 @@ useEffect(() => {
     return s;
   }, [breakQueue]);
 
-const POOL_TZ = "America/New_York";
 
-const minutesInTZ = (iso: string) => {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone: POOL_TZ, hour12: false, hour: "2-digit", minute: "2-digit"
-  });
-  const parts = dtf.formatToParts(new Date(iso));
-  const hh = Number(parts.find(p => p.type === "hour")?.value ?? "0");
-  const mm = Number(parts.find(p => p.type === "minute")?.value ?? "0");
-  return hh * 60 + mm;
-};
 const isOnShift = useCallback((nowISO: string, s?: ShiftInfo | null): boolean => {
   if (!s) return false;
 
