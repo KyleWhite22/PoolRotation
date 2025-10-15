@@ -188,10 +188,12 @@ router.post("/rotate", async (req: any, res) => {
   const roster: Record<string, ShiftInfo> = stateForRoster.roster || {};
 
   const onShiftSet = new Set(
-    Object.keys(roster).filter((gid) => isOnShift(nowISO, roster[gid]))
-  );
+  guards
+    .map(g => g.id)
+    .filter(gid => isOnShift(nowISO, roster[gid] ?? { shiftType: "FULL" }))
+);
   // If roster is empty, treat as "everyone on-shift" for backward-compat
-  const rosterActive = onShiftSet.size > 0 ? onShiftSet : new Set(guards.map((g) => g.id));
+const rosterActive = onShiftSet;
 
   // Client may pass allowedIds; intersect with on-shift
   const clientAllowed = Array.isArray(req.body?.allowedIds)

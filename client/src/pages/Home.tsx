@@ -205,13 +205,14 @@ export default function Home() {
     saveSnapshot(dayKey, snap);
   }, [assigned, breakQueue, breaks, conflicts, onDutyIds, simulatedNow, dayKey, roster]);
 
-  useEffect(() => {
-    if (!guardsLoaded) return;
-    setOnDutyIds((prev) => {
-      const keep = [...prev].filter((id) => knownIds.has(id) || isUuid(id));
-      return new Set(keep);
-    });
-  }, [guardsLoaded, knownIds]);
+ useEffect(() => {
+  if (!guardsLoaded) return;
+  // if no saved on-duty selection, default to all guards
+  setOnDutyIds(prev => {
+    if (prev.size > 0) return prev;
+    return new Set(guards.map(g => g.id));
+  });
+}, [guardsLoaded, guards]);
 
   // --- Derived ---
   const usedGuardIds = useMemo(
