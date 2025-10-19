@@ -332,7 +332,7 @@ export default function PoolMap({
         >
           GuardName:
         </span>
-        <span>: &lt;16 yrs old</span>
+        <span> &lt;16 yrs old</span>
       </div>
 
       {/* Row 2: Section anchor */}
@@ -342,7 +342,7 @@ export default function PoolMap({
         <g transform="translate(0 26)">
           <rect x={0} y={0} width={12} height={12} stroke="#dc2626" strokeWidth={1.5} fill="none" rx={2} />
           <text x={16} y={9} fontSize="9" fill="#f1f5f9">
-            Adult Swim Chair
+            : Adult Swim Chair
           </text>
         </g>
       </g>
