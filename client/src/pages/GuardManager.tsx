@@ -235,7 +235,7 @@ export default function GuardsPage() {
   };
 
   return (
-    <AppShell title="Guard Manager" actions={<></>}>
+    <AppShell title="Lifeguard Manager" actions={<></>}>
       <div className="max-w-5xl mx-auto w-full">
         <section className="space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 shadow-md p-4">
           {/* Controls */}
